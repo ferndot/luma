@@ -174,13 +174,10 @@ impl Show {
     }
 }
 
-/// Subnets scanned even when this machine's adapters point elsewhere (for example a VPN),
-/// because lights were found on them before.
-const FALLBACK_PREFIXES: &[&str] = &["192.168.10"];
-
-/// The /24 prefixes to scan for lights, most likely first. Empty if no network is found.
-pub fn local_prefixes() -> Vec<String> {
-    luma_govee::lan::local_prefixes(FALLBACK_PREFIXES)
+/// The /24 prefixes to scan for lights: this machine's networks first, then `extra`
+/// (for example the subnets of lights remembered from an earlier run). Empty if no network is found.
+pub fn local_prefixes(extra: &[String]) -> Vec<String> {
+    luma_govee::lan::local_prefixes(extra)
 }
 
 /// Discovers lights on `prefixes` in the background; the result arrives on the returned channel.

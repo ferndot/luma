@@ -2,6 +2,8 @@
 use luma_engine::{LightSpec, Mode, Show};
 use serde::Serialize;
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 pub type Discovery = Receiver<Result<Vec<LightSpec>, String>>;
@@ -18,6 +20,10 @@ pub struct AppState {
     pub notice: String,
     /// The subnet being scanned, detected from the local network.
     pub subnet: String,
+    /// IPs of lights found in an earlier run; their subnets are scanned too.
+    pub remembered: Vec<String>,
+    /// Where `remembered` is saved, when the app has a data folder.
+    pub store_path: Option<PathBuf>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -69,12 +75,12 @@ pub fn merge_found(state: &mut AppState, found: Vec<LightSpec>) {
     }
 }
 
-/// Picks up a finished discovery, if any.
-pub fn poll_discovery(state: &mut AppState) {
-    let Some(rx) = &state.discovery else { return };
+/// Picks up a finished discovery, if any. Returns true when it finished successfully.
+pub fn poll_discovery(state: &mut AppState) -> bool {
+    let Some(rx) = &state.discovery else { return false };
     let result = match rx.try_recv() {
         Ok(result) => result,
-        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Empty) => return false,
         Err(TryRecvError::Disconnected) => Err("Discovery stopped unexpectedly".to_string()),
     };
     state.discovery = None;
@@ -82,17 +88,46 @@ pub fn poll_discovery(state: &mut AppState) {
         Ok(found) => {
             state.notice = format!("Found {} light(s)", found.len());
             merge_found(state, found);
+            true
         }
-        Err(e) => state.notice = e,
+        Err(e) => {
+            state.notice = e;
+            false
+        }
     }
 }
 
-/// Detects the local subnet and scans it for lights, unless a scan is already running.
+/// The /24 prefix of an IPv4 address string ("192.168.10.7" -> "192.168.10").
+pub fn prefix_of_ip(ip: &str) -> Option<String> {
+    let parts: Vec<&str> = ip.split('.').collect();
+    (parts.len() == 4).then(|| parts[..3].join("."))
+}
+
+/// Loads the IPs of lights found in an earlier run. A missing or unreadable file means none.
+pub fn load_remembered(path: &Path) -> Vec<String> {
+    fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+/// Saves the IPs of the known lights so the next run can scan their subnets.
+pub fn save_remembered(state: &AppState) {
+    let Some(path) = &state.store_path else { return };
+    let ips: Vec<&str> = state.known.iter().map(|l| l.ip.as_str()).collect();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string(&ips) {
+        let _ = fs::write(path, text);
+    }
+}
+
+/// Detects the local subnets and scans them for lights, unless a scan is already running.
 pub fn begin_discovery(state: &mut AppState) -> Result<(), String> {
     if state.discovery.is_some() {
         return Ok(());
     }
-    let prefixes = luma_engine::local_prefixes();
+    let mut extra: Vec<String> = state.remembered.iter().filter_map(|ip| prefix_of_ip(ip)).collect();
+    extra.extend(state.known.iter().filter_map(|l| prefix_of_ip(&l.ip)));
+    let prefixes = luma_engine::local_prefixes(&extra);
     if prefixes.is_empty() {
         return Err("No network found. Connect to Wi-Fi or Ethernet and try again.".into());
     }
@@ -241,6 +276,12 @@ mod tests {
         let mut s = with_lights();
         set_selected(&mut s, &[]);
         assert_eq!(start(&s), Err("Select at least one light".to_string()));
+    }
+
+    #[test]
+    fn remembered_lights_give_their_subnet() {
+        assert_eq!(prefix_of_ip("192.168.10.42"), Some("192.168.10".into()));
+        assert_eq!(prefix_of_ip("not-an-ip"), None);
     }
 
     #[test]

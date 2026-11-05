@@ -2,7 +2,7 @@ mod logic;
 
 use logic::{AppState, StateView};
 use std::sync::{Mutex, MutexGuard};
-use tauri::State;
+use tauri::{Manager, State};
 
 type Shared = Mutex<AppState>;
 
@@ -13,7 +13,9 @@ fn lock(app: &Shared) -> Result<MutexGuard<'_, AppState>, String> {
 #[tauri::command]
 fn get_state(app: State<'_, Shared>) -> Result<StateView, String> {
     let mut s = lock(&app)?;
-    logic::poll_discovery(&mut s);
+    if logic::poll_discovery(&mut s) {
+        logic::save_remembered(&s);
+    }
     Ok(logic::view(&s))
 }
 
@@ -51,7 +53,13 @@ fn stop(app: State<'_, Shared>) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
-        .manage(Mutex::new(AppState::default()))
+        .setup(|app| {
+            // Lights found in earlier runs are kept in the app's data folder.
+            let store_path = app.path().app_data_dir().ok().map(|dir| dir.join("lights.json"));
+            let remembered = store_path.as_deref().map(logic::load_remembered).unwrap_or_default();
+            app.manage(Mutex::new(AppState { store_path, remembered, ..Default::default() }));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![get_state, set_mode, find_lights, set_selected, start, stop])
         .run(tauri::generate_context!())
         .expect("error while running Luma");

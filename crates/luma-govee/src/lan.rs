@@ -29,8 +29,8 @@ fn default_route_prefix() -> Option<String> {
 }
 
 /// Every /24 worth scanning, most likely first: the default route, then each local adapter,
-/// then the fallbacks. Duplicates are dropped and the order is kept.
-pub fn local_prefixes(fallbacks: &[&str]) -> Vec<String> {
+/// then `extra`. Duplicates are dropped and the order is kept.
+pub fn local_prefixes(extra: &[String]) -> Vec<String> {
     let adapters = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
@@ -39,12 +39,12 @@ pub fn local_prefixes(fallbacks: &[&str]) -> Vec<String> {
             IpAddr::V6(_) => None,
         })
         .collect();
-    merge_prefixes(default_route_prefix(), adapters, fallbacks)
+    merge_prefixes(default_route_prefix(), adapters, extra)
 }
 
-fn merge_prefixes(first: Option<String>, adapters: Vec<String>, fallbacks: &[&str]) -> Vec<String> {
+fn merge_prefixes(first: Option<String>, adapters: Vec<String>, extra: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let candidates = first.into_iter().chain(adapters).chain(fallbacks.iter().map(|s| s.to_string()));
+    let candidates = first.into_iter().chain(adapters).chain(extra.iter().cloned());
     for p in candidates {
         if !out.contains(&p) {
             out.push(p);
@@ -62,7 +62,7 @@ mod tests {
         let got = merge_prefixes(
             Some("192.168.10".into()),
             vec!["10.0.0".into(), "192.168.10".into(), "172.17.0".into()],
-            &["192.168.10", "192.168.1"],
+            &["192.168.10".to_string(), "192.168.1".to_string()],
         );
         assert_eq!(got, vec!["192.168.10", "10.0.0", "172.17.0", "192.168.1"]);
     }
