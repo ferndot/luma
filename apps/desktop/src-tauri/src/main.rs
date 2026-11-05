@@ -24,9 +24,9 @@ fn set_mode(app: State<'_, Shared>, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn find_lights(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
+fn find_lights(app: State<'_, Shared>) -> Result<(), String> {
     let mut s = lock(&app)?;
-    logic::begin_discovery(&mut s, &subnet)
+    logic::begin_discovery(&mut s)
 }
 
 #[tauri::command]

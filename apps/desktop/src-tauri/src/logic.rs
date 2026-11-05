@@ -16,6 +16,8 @@ pub struct AppState {
     pub discovery: Option<Discovery>,
     /// Last discovery result or error, shown when the show is idle.
     pub notice: String,
+    /// The subnet being scanned, detected from the local network.
+    pub subnet: String,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -30,6 +32,8 @@ pub struct LightView {
 #[derive(Serialize, Debug, PartialEq)]
 pub struct StateView {
     pub running: bool,
+    pub scanning: bool,
+    pub subnet: String,
     pub mode: String,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
@@ -83,15 +87,15 @@ pub fn poll_discovery(state: &mut AppState) {
     }
 }
 
-/// Starts discovery on `subnet` unless one is already running.
-pub fn begin_discovery(state: &mut AppState, subnet: &str) -> Result<(), String> {
-    let subnet = subnet.trim();
-    if subnet.is_empty() {
-        return Err("400: subnet is required".into());
+/// Detects the local subnet and scans it for lights, unless a scan is already running.
+pub fn begin_discovery(state: &mut AppState) -> Result<(), String> {
+    if state.discovery.is_some() {
+        return Ok(());
     }
-    if state.discovery.is_none() {
-        state.discovery = Some(luma_engine::find_lights(subnet));
-    }
+    let prefix = luma_engine::local_prefix()
+        .ok_or("No network found. Connect to Wi-Fi or Ethernet and try again.")?;
+    state.subnet = format!("{prefix}.0/24");
+    state.discovery = Some(luma_engine::find_lights(&prefix));
     Ok(())
 }
 
@@ -133,7 +137,15 @@ pub fn view(state: &AppState) -> StateView {
             selected: state.selected.contains(&l.ip),
         })
         .collect();
-    StateView { running, mode, status, preview, lights }
+    StateView {
+        running,
+        scanning: state.discovery.is_some(),
+        subnet: state.subnet.clone(),
+        mode,
+        status,
+        preview,
+        lights,
+    }
 }
 
 #[cfg(test)]
@@ -230,9 +242,11 @@ mod tests {
     }
 
     #[test]
-    fn begin_discovery_rejects_empty_subnet() {
-        let mut s = AppState::default();
-        assert!(begin_discovery(&mut s, "  ").is_err());
-        assert!(s.discovery.is_none());
+    fn begin_discovery_keeps_a_running_scan() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut s = AppState { discovery: Some(rx), subnet: "10.1.1.0/24".into(), ..Default::default() };
+        assert!(begin_discovery(&mut s).is_ok());
+        assert_eq!(s.subnet, "10.1.1.0/24");
+        assert!(view(&s).scanning);
     }
 }

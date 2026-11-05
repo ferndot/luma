@@ -1,12 +1,26 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
 const MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
 const SCAN_PORT: u16 = 4001;
 const REPLY_PORT: u16 = 4002;
 const CONTROL_PORT: u16 = 4003;
+
+/// The local /24 prefix (e.g. "192.168.1") of the adapter the OS routes through.
+/// Connecting a UDP socket sends no packets; it only asks the OS which address it would use.
+pub fn local_prefix() -> Option<String> {
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => {
+            let o = ip.octets();
+            Some(format!("{}.{}.{}", o[0], o[1], o[2]))
+        }
+        _ => None,
+    }
+}
 
 pub fn send(ip: &str, msg: &Value) -> std::io::Result<()> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;

@@ -15,11 +15,14 @@
     { ch: 'm', color: '#facc15' },
     { ch: 'a', color: '#4ade80' },
   ]
+  // Look for lights again this often while the show is idle.
+  const RESCAN_MS = 60_000
 
   let st = $state<AppState | null>(null)
   let error = $state('')
-  let subnet = $state('192.168.1')
   let selectedIps = $derived(st ? st.lights.filter((l) => l.selected).map((l) => l.ip) : [])
+  let selectedCount = $derived(selectedIps.length)
+  let lightCount = $derived(st ? st.lights.length : 0)
 
   // Poll the backend about 5 times a second while the page is open.
   $effect(() => {
@@ -43,6 +46,16 @@
     }
   })
 
+  // Find lights on launch, then quietly again while idle, so new or rebooted lights show up.
+  $effect(() => {
+    const scan = () => {
+      if (!st?.running) run(() => findLights())
+    }
+    scan()
+    const id = setInterval(scan, RESCAN_MS)
+    return () => clearInterval(id)
+  })
+
   async function run(action: () => Promise<unknown>) {
     error = ''
     try {
@@ -59,25 +72,31 @@
     run(() => setSelected([...next]))
   }
 
+  function selectAll(on: boolean) {
+    run(() => setSelected(on && st ? st.lights.map((l) => l.ip) : []))
+  }
+
   function toggleShow() {
     run(() => (st?.running ? stop() : start()))
   }
 
-  function search(e: SubmitEvent) {
-    e.preventDefault()
-    run(() => findLights(subnet))
-  }
+  let statusText = $derived(error || st?.status || 'Connecting...')
 </script>
 
 <main>
-  <h1 class="title" aria-label="luma">
-    {#each letters as l, i (i)}
-      <span style="color: {l.color}; animation-delay: {i * 0.15}s">{l.ch}</span>
-    {/each}
-  </h1>
+  <header class="top">
+    <h1 class="title" aria-label="luma">
+      {#each letters as l, i (i)}
+        <span style="color: {l.color}; animation-delay: {i * 0.15}s">{l.ch}</span>
+      {/each}
+    </h1>
+    <p class="tagline">Sync your Govee lights to music, your screen, or a pattern</p>
+  </header>
 
   <section class="card">
-    <h2>Mode</h2>
+    <div class="card-head">
+      <h2>Mode</h2>
+    </div>
     <div class="modes">
       {#each modes as m (m.name)}
         <button
@@ -85,6 +104,7 @@
           class:active={st?.mode === m.name}
           style="--c: {m.color}"
           onclick={() => run(() => setMode(m.name))}
+          aria-pressed={st?.mode === m.name}
         >
           {m.label}
         </button>
@@ -97,10 +117,13 @@
       class="power"
       class:stop={st?.running}
       onclick={toggleShow}
-      disabled={!st?.running && selectedIps.length === 0}
+      disabled={!st?.running && selectedCount === 0}
     >
       {st?.running ? 'Stop' : 'Start the show'}
     </button>
+    {#if !st?.running && selectedCount === 0 && lightCount > 0}
+      <p class="hint">Select at least one light below to start.</p>
+    {/if}
 
     <div class="preview" aria-label="Live preview">
       {#each st?.preview ?? [] as c, i (i)}
@@ -110,31 +133,57 @@
   </section>
 
   <section class="card">
-    <h2>Lights</h2>
-    <form class="find" onsubmit={search}>
-      <input bind:value={subnet} placeholder="192.168.1" aria-label="Subnet" />
-      <button type="submit">Find lights</button>
-    </form>
+    <div class="card-head">
+      <h2>Lights</h2>
+      <div class="head-actions">
+        {#if lightCount > 0}
+          <button class="ghost" onclick={() => selectAll(selectedCount < lightCount)} disabled={st?.running}>
+            {selectedCount < lightCount ? 'Select all' : 'Clear'}
+          </button>
+        {/if}
+        <button class="ghost" onclick={() => run(() => findLights())} disabled={st?.scanning}>
+          {st?.scanning ? 'Scanning…' : 'Rescan'}
+        </button>
+      </div>
+    </div>
+    {#if st?.subnet}
+      <p class="subnet">Scanning <code>{st.subnet}</code> on your network</p>
+    {/if}
 
-    {#if st && st.lights.length > 0}
+    {#if lightCount > 0}
       <ul class="lights">
-        {#each st.lights as l (l.ip)}
+        {#each st?.lights ?? [] as l (l.ip)}
           <li>
-            <label>
-              <input type="checkbox" checked={l.selected} onchange={() => toggleLight(l.ip)} />
-              <span class="name">{l.sku}</span>
-              <span class="ip">{l.ip}</span>
+            <label class:on={l.selected}>
+              <input
+                type="checkbox"
+                checked={l.selected}
+                disabled={st?.running}
+                onchange={() => toggleLight(l.ip)}
+              />
+              <span class="meta">
+                <span class="name">{l.sku}</span>
+                <span class="ip">{l.ip}</span>
+              </span>
               {#if l.razer}<span class="tag">{l.segments} zones</span>{/if}
             </label>
           </li>
         {/each}
       </ul>
+    {:else if st?.scanning}
+      <div class="empty">
+        <span class="spinner" aria-hidden="true"></span>
+        <p>Looking for lights…</p>
+      </div>
     {:else}
-      <p class="muted">No lights yet. Enter your subnet and search.</p>
+      <div class="empty">
+        <p>No lights found yet.</p>
+        <p class="muted">Make sure they are on, on the same Wi-Fi as this computer, and LAN Control is enabled in the Govee app.</p>
+      </div>
     {/if}
   </section>
 
-  <p class="status" role="status" aria-live="polite">{error || st?.status || 'Connecting...'}</p>
+  <p class="status" role="status" aria-live="polite">{statusText}</p>
 </main>
 
 <style>
@@ -146,8 +195,14 @@
     gap: 16px;
   }
 
+  .top {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    margin-top: 8px;
+  }
   .title {
-    margin: 8px 0 0;
+    margin: 0;
     text-align: center;
     font-size: clamp(56px, 16vw, 112px);
     font-weight: 900;
@@ -159,6 +214,11 @@
     display: inline-block;
     animation: bob 2.4s ease-in-out infinite;
   }
+  .tagline {
+    margin: 0;
+    font-size: 0.95rem;
+    opacity: 0.7;
+  }
 
   .card {
     background: rgba(255, 255, 255, 0.07);
@@ -167,13 +227,37 @@
     padding: 18px;
     backdrop-filter: blur(10px);
   }
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
   h2 {
-    margin: 0 0 12px;
+    margin: 0;
     font-size: 1rem;
     text-transform: uppercase;
     letter-spacing: 0.12em;
     color: #d8c8ff;
   }
+  .head-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .ghost {
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: transparent;
+    color: #e9ddff;
+    cursor: pointer;
+  }
+  .ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+  .ghost:disabled { opacity: 0.5; cursor: default; }
 
   .modes {
     display: grid;
@@ -199,7 +283,7 @@
   .show {
     display: grid;
     justify-items: center;
-    gap: 18px;
+    gap: 14px;
   }
   .power {
     min-width: min(100%, 300px);
@@ -224,6 +308,11 @@
     animation: none;
     cursor: not-allowed;
   }
+  .hint {
+    margin: 0;
+    font-size: 0.9rem;
+    opacity: 0.7;
+  }
 
   .preview {
     display: flex;
@@ -241,31 +330,13 @@
     transition: background 0.2s linear, box-shadow 0.2s linear;
   }
 
-  .find {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 14px;
+  .subnet {
+    margin: -4px 0 12px;
+    font-size: 0.85rem;
+    opacity: 0.7;
   }
-  .find input {
-    flex: 1 1 160px;
-    min-width: 0;
-  }
-  input,
-  .find button {
-    font: inherit;
-    border-radius: 14px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    padding: 12px 14px;
-    background: rgba(10, 4, 22, 0.55);
-    color: inherit;
-  }
-  .find button {
-    background: #7c3aed;
-    border-color: transparent;
-    font-weight: 700;
-    cursor: pointer;
-    padding: 12px 18px;
+  .subnet code {
+    font-variant-numeric: tabular-nums;
   }
 
   .lights {
@@ -279,19 +350,31 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     padding: 12px 14px;
     border-radius: 14px;
     background: rgba(10, 4, 22, 0.35);
+    border: 1px solid transparent;
     cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .lights label.on {
+    border-color: rgba(168, 85, 247, 0.6);
+    background: rgba(88, 28, 135, 0.35);
   }
   .lights input[type='checkbox'] {
     width: 20px;
     height: 20px;
     accent-color: #a855f7;
   }
+  .lights input:disabled + .meta { opacity: 0.6; }
+  .meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
   .name { font-weight: 700; }
-  .ip { opacity: 0.7; font-variant-numeric: tabular-nums; }
+  .ip { font-size: 0.85rem; opacity: 0.7; font-variant-numeric: tabular-nums; }
   .tag {
     margin-left: auto;
     font-size: 0.8rem;
@@ -300,7 +383,24 @@
     background: rgba(20, 184, 166, 0.25);
     color: #9ff5ea;
   }
-  .muted { opacity: 0.65; margin: 0; }
+
+  .empty {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    padding: 18px 8px;
+    text-align: center;
+  }
+  .empty p { margin: 0; }
+  .muted { opacity: 0.65; font-size: 0.9rem; }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    border-top-color: #a855f7;
+    animation: spin 0.9s linear infinite;
+  }
 
   .status {
     text-align: center;
@@ -309,6 +409,9 @@
     color: #e9ddff;
   }
 
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
   @keyframes bob {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-8px); }

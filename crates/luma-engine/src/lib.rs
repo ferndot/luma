@@ -174,6 +174,11 @@ impl Show {
     }
 }
 
+/// The local /24 prefix (e.g. "192.168.1") of the network this machine is on, if any.
+pub fn local_prefix() -> Option<String> {
+    luma_govee::lan::local_prefix()
+}
+
 /// Discovers lights on `subnet` in the background; the result arrives on the returned channel.
 pub fn find_lights(subnet: &str) -> mpsc::Receiver<Result<Vec<LightSpec>, String>> {
     let (tx, rx) = mpsc::channel();
