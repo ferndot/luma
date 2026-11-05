@@ -1,0 +1,13 @@
+[package]
+name = "luma-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+luma-core = { path = "../luma-core" }
+luma-audio = { path = "../luma-audio" }
+luma-govee = { path = "../luma-govee" }
+luma-screen = { path = "../luma-screen" }
+serde_json = "1.0.154"
+eframe = "0.37.0"
