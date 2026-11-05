@@ -11,56 +11,52 @@
   ]
 </script>
 
-<section>
-  <h2 class="section-title">Mode</h2>
-  <div class="list" role="group" aria-label="Mode">
-    {#each modes as m (m.name)}
-      <button
-        class="item"
-        class:active={mode === m.name}
-        style="--c: {m.color}"
-        aria-pressed={mode === m.name}
-        onclick={() => onpick(m.name)}
-      >
-        <span class="swatch" aria-hidden="true"></span>
-        {m.label}
-      </button>
-    {/each}
-  </div>
-</section>
+<div class="modes" role="group" aria-label="Pattern">
+  {#each modes as m (m.name)}
+    <button
+      class="mode"
+      class:active={mode === m.name}
+      style="--c: {m.color}"
+      aria-pressed={mode === m.name}
+      onclick={() => onpick(m.name)}
+    >
+      <span class="dot" aria-hidden="true"></span>
+      {m.label}
+    </button>
+  {/each}
+</div>
 
 <style>
-  .list {
+  .modes {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    flex-wrap: wrap;
+    gap: 8px;
   }
-  .item {
+  .mode {
     display: flex;
     align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 7px 10px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    text-align: left;
-    font-size: 13px;
+    gap: 8px;
+    padding: 9px 16px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    font-size: 14px;
+    font-weight: 500;
   }
-  .item:hover { background: rgba(255, 255, 255, 0.05); }
-  .item.active {
-    background: var(--raised);
+  .mode:hover { background: var(--raised); }
+  .mode.active {
+    border-color: var(--c);
+    background: color-mix(in srgb, var(--c) 18%, var(--surface));
     font-weight: 600;
   }
-  .swatch {
+  .dot {
     width: 10px;
     height: 10px;
-    border-radius: 3px;
+    border-radius: 50%;
     background: var(--c);
-    flex: none;
-    opacity: 0.6;
+    opacity: 0.55;
   }
-  .item.active .swatch {
+  .mode.active .dot {
     opacity: 1;
     box-shadow: 0 0 8px var(--c);
   }

@@ -5,44 +5,35 @@
     findLights,
     addSubnet,
     removeSubnet,
-    setSelected,
-    start,
+    createGroup,
+    renameGroup,
+    setGroupMembers,
+    setGroupPosition,
+    startGroup,
+    deleteGroup,
+    setApiKey,
     stop,
     type AppState,
   } from './lib/api'
-  import Toolbar from './lib/components/Toolbar.svelte'
-  import Statusbar from './lib/components/Statusbar.svelte'
-  import ModePicker from './lib/components/ModePicker.svelte'
-  import ShowStage from './lib/components/ShowStage.svelte'
-  import LightList from './lib/components/LightList.svelte'
-  import NetworkPanel from './lib/components/NetworkPanel.svelte'
+  import Sidebar, { type Page } from './lib/components/Sidebar.svelte'
+  import GroupsPage from './lib/components/GroupsPage.svelte'
+  import GroupDetail from './lib/components/GroupDetail.svelte'
   import Settings from './lib/components/Settings.svelte'
-  import { setApiKey } from './lib/api'
 
-  let settingsOpen = $state(false)
-
-  async function saveKey(key: string): Promise<boolean> {
-    return run(() => setApiKey(key))
-  }
-
-  // Look for lights again this often while the show is idle.
+  // Look for lights again this often while no scene is running.
   const RESCAN_MS = 60_000
 
   let st = $state<AppState | null>(null)
   let error = $state('')
-  let selectedIps = $derived(st ? st.lights.filter((l) => l.selected).map((l) => l.ip) : [])
-  let selectedCount = $derived(selectedIps.length)
-  let lightCount = $derived(st ? st.lights.length : 0)
+  let page = $state<Page>({ kind: 'home' })
 
-  let statusText = $derived(
-    error ||
-      (!st?.running && selectedCount === 0 && lightCount > 0 ? 'Select at least one light to start.' : '') ||
-      st?.status ||
-      'Connecting...',
+  // The open group, or back to the list if it was deleted.
+  let openGroup = $derived(
+    page.kind === 'group' ? (st?.groups.find((g) => g.id === (page as { id: string }).id) ?? null) : null,
   )
-  let tone = $derived<'idle' | 'busy' | 'live' | 'error'>(
-    error ? 'error' : st?.running ? 'live' : st?.scanning ? 'busy' : 'idle',
-  )
+  $effect(() => {
+    if (page.kind === 'group' && st && !openGroup) page = { kind: 'home' }
+  })
 
   // Poll the backend about 5 times a second while the page is open.
   $effect(() => {
@@ -88,23 +79,17 @@
     }
   }
 
-  function pickMode(name: string) {
-    run(() => setMode(name))
+  async function newGroup(name: string): Promise<boolean> {
+    let id = ''
+    const ok = await run(async () => {
+      id = await createGroup(name)
+    })
+    if (ok) page = { kind: 'group', id }
+    return ok
   }
 
-  function toggleLight(ip: string) {
-    const next = new Set(selectedIps)
-    if (next.has(ip)) next.delete(ip)
-    else next.add(ip)
-    run(() => setSelected([...next]))
-  }
-
-  function selectAll(on: boolean) {
-    run(() => setSelected(on && st ? st.lights.map((l) => l.ip) : []))
-  }
-
-  function toggleShow() {
-    run(() => (st?.running ? stop() : start()))
+  async function saveKey(key: string): Promise<boolean> {
+    return run(() => setApiKey(key))
   }
 
   async function addNetwork(value: string): Promise<boolean> {
@@ -115,94 +100,79 @@
 </script>
 
 <div class="app">
-  <Toolbar
-    running={st?.running ?? false}
-    canStart={selectedCount > 0}
-    {settingsOpen}
-    ontoggle={toggleShow}
-    onsettings={() => (settingsOpen = !settingsOpen)}
-  />
+  <Sidebar groups={st?.groups ?? []} {page} onnav={(p) => (page = p)} />
 
-  <aside class="sidebar">
-    <ModePicker mode={st?.mode} onpick={pickMode} />
-    <NetworkPanel
-      subnets={st?.subnets ?? []}
-      onadd={addNetwork}
-      onremove={(s) => run(() => removeSubnet(s))}
-    />
-  </aside>
-
-  {#if settingsOpen}
-    <main class="content">
-      <Settings hasKey={st?.has_key ?? false} keyStatus={st?.key_status ?? ''} onsave={saveKey} />
-    </main>
-  {:else}
   <main class="content">
-    <ShowStage preview={st?.preview ?? []} running={st?.running ?? false} />
-    <LightList
-      lights={st?.lights ?? []}
-      running={st?.running ?? false}
-      scanning={st?.scanning ?? false}
-      subnet={st?.subnet ?? ''}
-      ontoggle={toggleLight}
-      onselectall={selectAll}
-      onrescan={() => run(() => findLights())}
-    />
-  </main>
-  {/if}
+    {#if error}
+      <p class="error" role="alert">{error}</p>
+    {/if}
 
-  <Statusbar text={statusText} {tone} />
+    {#if page.kind === 'settings'}
+      <Settings
+        hasKey={st?.has_key ?? false}
+        keyStatus={st?.key_status ?? ''}
+        onsave={saveKey}
+        subnets={st?.subnets ?? []}
+        onadd={addNetwork}
+        onremove={(s) => run(() => removeSubnet(s))}
+      />
+    {:else if openGroup}
+      <GroupDetail
+        group={openGroup}
+        lights={st?.lights ?? []}
+        mode={st?.mode ?? ''}
+        preview={st?.preview ?? []}
+        running={st?.running ?? false}
+        onrename={(name) => run(() => renameGroup(openGroup.id, name))}
+        onmembers={(members) => run(() => setGroupMembers(openGroup.id, members))}
+        onposition={(device, x, y) => run(() => setGroupPosition(openGroup.id, device, x, y))}
+        onstart={() => run(() => startGroup(openGroup.id))}
+        onstop={() => run(() => stop())}
+        onpick={(name) => run(() => setMode(name))}
+        ondelete={() => {
+          run(() => deleteGroup(openGroup.id))
+          page = { kind: 'home' }
+        }}
+      />
+    {:else}
+      <GroupsPage
+        groups={st?.groups ?? []}
+        scanning={st?.scanning ?? false}
+        oncreate={newGroup}
+        onopen={(id) => (page = { kind: 'group', id })}
+        onrescan={() => run(() => findLights())}
+      />
+    {/if}
+  </main>
 </div>
 
 <style>
   .app {
     height: 100vh;
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    grid-template-areas:
-      'toolbar toolbar'
-      'sidebar content'
-      'status status';
+    grid-template-columns: 200px minmax(0, 1fr);
     overflow: hidden;
   }
-  .app > :global(.toolbar) { grid-area: toolbar; }
-  .app > :global(.statusbar) { grid-area: status; }
-  .sidebar {
-    grid-area: sidebar;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    padding: 14px 12px;
-    overflow-y: auto;
-    border-right: 1px solid var(--line);
-    background: var(--surface);
-  }
   .content {
-    grid-area: content;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    min-height: 0;
     min-width: 0;
+    min-height: 0;
     background: var(--bg);
   }
+  .error {
+    margin: 0;
+    padding: 8px 24px;
+    background: rgba(239, 68, 68, 0.15);
+    color: #fecaca;
+    font-size: 13px;
+  }
 
-  /* Narrow windows: the sidebar moves above the content and scrolls on its own. */
-  @media (max-width: 700px) {
+  /* Narrow windows: the sidebar becomes a strip above the page. */
+  @media (max-width: 640px) {
     .app {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: auto auto minmax(0, 1fr) auto;
-      grid-template-areas:
-        'toolbar'
-        'sidebar'
-        'content'
-        'status';
-    }
-    .sidebar {
-      max-height: 34vh;
-      border-right: none;
-      border-bottom: 1px solid var(--line);
+      grid-template-rows: auto minmax(0, 1fr);
     }
   }
 </style>

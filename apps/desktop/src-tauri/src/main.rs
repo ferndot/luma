@@ -21,6 +21,52 @@ fn get_state(app: State<'_, Shared>) -> Result<StateView, String> {
 }
 
 #[tauri::command]
+fn create_group(app: State<'_, Shared>, name: String) -> Result<String, String> {
+    let mut s = lock(&app)?;
+    let id = logic::create_group(&mut s, &name)?;
+    logic::save_state(&s);
+    Ok(id)
+}
+
+#[tauri::command]
+fn rename_group(app: State<'_, Shared>, id: String, name: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::rename_group(&mut s, &id, &name)?;
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_group_members(app: State<'_, Shared>, id: String, members: Vec<String>) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::set_group_members(&mut s, &id, &members)?;
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_group_position(app: State<'_, Shared>, id: String, device: String, x: f32, y: f32) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::set_group_position(&mut s, &id, &device, x, y)?;
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn start_group(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::start_group(&mut s, &id)
+}
+
+#[tauri::command]
+fn delete_group(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::delete_group(&mut s, &id);
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
 fn set_api_key(app: State<'_, Shared>, key: String) -> Result<(), String> {
     let mut s = lock(&app)?;
     logic::set_api_key(&mut s, &key);
@@ -40,14 +86,6 @@ fn add_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
 fn remove_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
     let mut s = lock(&app)?;
     logic::remove_subnet(&mut s, &subnet);
-    logic::save_state(&s);
-    Ok(())
-}
-
-#[tauri::command]
-fn rename_light(app: State<'_, Shared>, id: String, name: String) -> Result<(), String> {
-    let mut s = lock(&app)?;
-    logic::rename_light(&mut s, &id, &name)?;
     logic::save_state(&s);
     Ok(())
 }
@@ -94,8 +132,8 @@ fn main() {
                 store_path,
                 remembered: saved.lights,
                 custom_subnets: saved.subnets,
-                names: saved.names,
                 api_key: saved.api_key,
+                groups: saved.groups,
                 ..Default::default()
             };
             logic::begin_name_fetch(&mut state);
@@ -108,8 +146,13 @@ fn main() {
             find_lights,
             add_subnet,
             remove_subnet,
-            rename_light,
             set_api_key,
+            create_group,
+            rename_group,
+            set_group_members,
+            set_group_position,
+            start_group,
+            delete_group,
             set_selected,
             start,
             stop

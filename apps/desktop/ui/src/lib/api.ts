@@ -22,6 +22,13 @@ export type Light = {
   selected: boolean
 }
 
+export type Group = {
+  id: string
+  name: string
+  members: string[]
+  positions: Record<string, [number, number]>
+}
+
 export type AppState = {
   running: boolean
   scanning: boolean
@@ -29,6 +36,7 @@ export type AppState = {
   subnets: string[]
   has_key: boolean
   key_status: string
+  groups: Group[]
   mode: string
   status: string
   preview: Rgb[]
@@ -40,8 +48,13 @@ export const setMode = (name: string) => invoke<void>('set_mode', { name })
 export const findLights = () => invoke<void>('find_lights')
 export const addSubnet = (subnet: string) => invoke<void>('add_subnet', { subnet })
 export const removeSubnet = (subnet: string) => invoke<void>('remove_subnet', { subnet })
-export const renameLight = (id: string, name: string) => invoke<void>('rename_light', { id, name })
+export const createGroup = (name: string) => invoke<string>('create_group', { name })
+export const renameGroup = (id: string, name: string) => invoke<void>('rename_group', { id, name })
+export const setGroupMembers = (id: string, members: string[]) =>
+  invoke<void>('set_group_members', { id, members })
+export const setGroupPosition = (id: string, device: string, x: number, y: number) =>
+  invoke<void>('set_group_position', { id, device, x, y })
+export const startGroup = (id: string) => invoke<void>('start_group', { id })
+export const deleteGroup = (id: string) => invoke<void>('delete_group', { id })
 export const setApiKey = (key: string) => invoke<void>('set_api_key', { key })
-export const setSelected =(ips: string[]) => invoke<void>('set_selected', { ips })
-export const start = () => invoke<void>('start')
 export const stop = () => invoke<void>('stop')

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Discovery = Receiver<Result<Vec<LightSpec>, String>>;
 pub type NameFetch = Receiver<Result<BTreeMap<String, String>, String>>;
@@ -28,10 +29,10 @@ pub struct AppState {
     pub remembered: Vec<String>,
     /// Subnets the user added by hand (e.g. an IoT network the PC can route to), as "a.b.c".
     pub custom_subnets: Vec<String>,
-    /// Names the user gave lights, keyed by device id.
-    pub names: BTreeMap<String, String>,
     /// Names from the Govee cloud account, keyed by device id.
     pub cloud_names: BTreeMap<String, String>,
+    /// Named sets of lights, by device id.
+    pub groups: Vec<Group>,
     /// Govee cloud API key, used only to read device names.
     pub api_key: Option<String>,
     pub names_fetch: Option<NameFetch>,
@@ -47,8 +48,27 @@ pub struct AppState {
 pub struct Saved {
     pub lights: Vec<String>,
     pub subnets: Vec<String>,
-    pub names: BTreeMap<String, String>,
     pub api_key: Option<String>,
+    pub groups: Vec<Group>,
+}
+
+/// A named set of lights, stored by device id so it survives IP changes.
+/// `positions` place each member in the room: x and y from 0 (left/top) to 1 (right/bottom).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub positions: BTreeMap<String, [f32; 2]>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct GroupView {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub positions: BTreeMap<String, [f32; 2]>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -70,6 +90,7 @@ pub struct StateView {
     pub subnets: Vec<String>,
     pub has_key: bool,
     pub key_status: String,
+    pub groups: Vec<GroupView>,
     pub mode: String,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
@@ -144,8 +165,8 @@ pub fn save_state(state: &AppState) {
     let saved = Saved {
         lights: state.known.iter().map(|l| l.ip.clone()).collect(),
         subnets: state.custom_subnets.clone(),
-        names: state.names.clone(),
         api_key: state.api_key.clone(),
+        groups: state.groups.clone(),
     };
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -185,24 +206,80 @@ pub fn remove_subnet(state: &mut AppState, prefix: &str) {
     state.custom_subnets.retain(|p| p != prefix);
 }
 
-/// Sets the name shown for a light. An empty name goes back to the default.
-pub fn rename_light(state: &mut AppState, id: &str, name: &str) -> Result<(), String> {
-    let name = name.trim();
-    if name.chars().count() > 40 {
-        return Err("Names can be at most 40 characters".into());
-    }
-    if name.is_empty() {
-        state.names.remove(id);
-    } else {
-        state.names.insert(id.to_string(), name.to_string());
-    }
-    Ok(())
-}
-
 /// The name shown for a light when the user has not set one: its model and last IP number.
 pub fn default_name(spec: &LightSpec) -> String {
     let last = spec.ip.rsplit('.').next().unwrap_or(&spec.ip);
     format!("{} · .{last}", spec.sku)
+}
+
+fn clean_group_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the group a name".into());
+    }
+    if name.chars().count() > 40 {
+        return Err("Group names can be at most 40 characters".into());
+    }
+    Ok(name.to_string())
+}
+
+fn find_group<'a>(state: &'a mut AppState, id: &str) -> Result<&'a mut Group, String> {
+    state.groups.iter_mut().find(|g| g.id == id).ok_or_else(|| "That group no longer exists".to_string())
+}
+
+/// Makes an empty group and returns its id.
+pub fn create_group(state: &mut AppState, name: &str) -> Result<String, String> {
+    let name = clean_group_name(name)?;
+    if state.groups.iter().any(|g| g.name.eq_ignore_ascii_case(&name)) {
+        return Err(format!("There is already a group named '{name}'"));
+    }
+    let id = format!("g{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    state.groups.push(Group { id: id.clone(), name, members: Vec::new(), positions: BTreeMap::new() });
+    Ok(id)
+}
+
+pub fn rename_group(state: &mut AppState, id: &str, name: &str) -> Result<(), String> {
+    let name = clean_group_name(name)?;
+    if state.groups.iter().any(|g| g.id != id && g.name.eq_ignore_ascii_case(&name)) {
+        return Err(format!("There is already a group named '{name}'"));
+    }
+    find_group(state, id)?.name = name;
+    Ok(())
+}
+
+/// Sets which devices are in a group. Only known devices are kept; positions of removed devices are dropped.
+pub fn set_group_members(state: &mut AppState, id: &str, members: &[String]) -> Result<(), String> {
+    let known: BTreeSet<&str> = state.known.iter().map(|l| l.id.as_str()).collect();
+    let members: Vec<String> = members.iter().filter(|m| known.contains(m.as_str())).cloned().collect();
+    let group = find_group(state, id)?;
+    group.positions.retain(|device, _| members.contains(device));
+    group.members = members;
+    Ok(())
+}
+
+/// Places a member of the group. Coordinates are clamped to the room, 0 to 1.
+pub fn set_group_position(state: &mut AppState, id: &str, device: &str, x: f32, y: f32) -> Result<(), String> {
+    let group = find_group(state, id)?;
+    if !group.members.iter().any(|m| m == device) {
+        return Err("That device is not in the group".into());
+    }
+    group.positions.insert(device.to_string(), [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]);
+    Ok(())
+}
+
+/// Selects the group's known lights and starts the show on them with the current mode.
+pub fn start_group(state: &mut AppState, id: &str) -> Result<(), String> {
+    let members = find_group(state, id)?.members.clone();
+    let ips: Vec<String> = state.known.iter().filter(|l| members.contains(&l.id)).map(|l| l.ip.clone()).collect();
+    if ips.is_empty() {
+        return Err("Add lights to the group first".into());
+    }
+    set_selected(state, &ips);
+    start(state)
+}
+
+pub fn delete_group(state: &mut AppState, id: &str) {
+    state.groups.retain(|g| g.id != id);
 }
 
 /// Stores the Govee API key (empty clears it) and fetches device names with it.
@@ -317,12 +394,7 @@ pub fn view(state: &AppState) -> StateView {
         .iter()
         .map(|l| LightView {
             id: l.id.clone(),
-            name: state
-                .names
-                .get(&l.id)
-                .or_else(|| state.cloud_names.get(&l.id))
-                .cloned()
-                .unwrap_or_else(|| default_name(l)),
+            name: state.cloud_names.get(&l.id).cloned().unwrap_or_else(|| default_name(l)),
             ip: l.ip.clone(),
             sku: l.sku.clone(),
             razer: l.razer,
@@ -337,6 +409,16 @@ pub fn view(state: &AppState) -> StateView {
         subnets: state.custom_subnets.clone(),
         has_key: state.api_key.is_some(),
         key_status: state.key_status.clone(),
+        groups: state
+            .groups
+            .iter()
+            .map(|g| GroupView {
+                id: g.id.clone(),
+                name: g.name.clone(),
+                members: g.members.clone(),
+                positions: g.positions.clone(),
+            })
+            .collect(),
         mode,
         status,
         preview,
@@ -432,12 +514,58 @@ mod tests {
     }
 
     #[test]
-    fn cloud_names_fill_in_unless_renamed() {
+    fn groups_start_with_no_devices_and_names_are_unique() {
+        let mut s = with_lights();
+        let id = create_group(&mut s, " Desk ").unwrap();
+        assert_eq!(s.groups[0].name, "Desk");
+        assert!(s.groups[0].members.is_empty());
+        assert!(create_group(&mut s, "desk").is_err());
+        assert!(create_group(&mut s, "  ").is_err());
+        assert!(rename_group(&mut s, &id, "Desk").is_ok());
+    }
+
+    #[test]
+    fn starting_a_group_selects_its_devices_and_needs_members() {
+        let mut s = with_lights();
+        let id = create_group(&mut s, "Desk").unwrap();
+        assert!(start_group(&mut s, &id).is_err());
+        set_group_members(&mut s, &id, &["id-10.0.0.2".into(), "unknown".into()]).unwrap();
+        assert_eq!(s.groups[0].members, vec!["id-10.0.0.2"]);
+        set_selected(&mut s, &["10.0.0.1".into()]);
+        // Starting spawns the show thread; selection is what we check here.
+        let _ = start_group(&mut s, &id);
+        assert_eq!(s.selected.iter().collect::<Vec<_>>(), vec!["10.0.0.2"]);
+        stop(&s);
+    }
+
+    #[test]
+    fn positions_are_kept_for_members_only_and_clamped() {
+        let mut s = with_lights();
+        let id = create_group(&mut s, "Room").unwrap();
+        set_group_members(&mut s, &id, &["id-10.0.0.1".into(), "id-10.0.0.2".into()]).unwrap();
+        set_group_position(&mut s, &id, "id-10.0.0.1", 1.5, -2.0).unwrap();
+        assert_eq!(s.groups[0].positions["id-10.0.0.1"], [1.0, 0.0]);
+        assert!(set_group_position(&mut s, &id, "id-10.0.0.3", 0.5, 0.5).is_err());
+        set_group_members(&mut s, &id, &["id-10.0.0.2".into()]).unwrap();
+        assert!(s.groups[0].positions.is_empty());
+    }
+
+    #[test]
+    fn groups_can_be_deleted_and_appear_in_the_view() {
+        let mut s = with_lights();
+        let id = create_group(&mut s, "Pair").unwrap();
+        set_group_members(&mut s, &id, &["id-10.0.0.1".into()]).unwrap();
+        assert_eq!(view(&s).groups[0].members, vec!["id-10.0.0.1"]);
+        delete_group(&mut s, &id);
+        assert!(view(&s).groups.is_empty());
+    }
+
+    #[test]
+    fn cloud_names_are_shown_when_present() {
         let mut s = with_lights();
         s.cloud_names.insert("id-10.0.0.1".into(), "Desk strip".into());
         assert_eq!(view(&s).lights[0].name, "Desk strip");
-        rename_light(&mut s, "id-10.0.0.1", "Shelf").unwrap();
-        assert_eq!(view(&s).lights[0].name, "Shelf");
+        assert_eq!(view(&s).lights[1].name, "H6000 · .2");
     }
 
     #[test]
@@ -450,16 +578,6 @@ mod tests {
         assert_eq!(names.len(), 1);
         assert_eq!(names["AA:01"], "Desk strip");
         assert!(parse_device_names(&serde_json::json!({"message": "bad key"})).is_err());
-    }
-
-    #[test]
-    fn renamed_lights_keep_their_name_and_empty_resets() {
-        let mut s = with_lights();
-        rename_light(&mut s, "id-10.0.0.2", "  Desk strip  ").unwrap();
-        assert_eq!(view(&s).lights[1].name, "Desk strip");
-        rename_light(&mut s, "id-10.0.0.2", "   ").unwrap();
-        assert_eq!(view(&s).lights[1].name, "H6000 · .2");
-        assert!(rename_light(&mut s, "id-10.0.0.2", &"x".repeat(41)).is_err());
     }
 
     #[test]

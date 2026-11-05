@@ -1,12 +1,20 @@
 <script lang="ts">
+  import NetworkPanel from './NetworkPanel.svelte'
+
   let {
     hasKey,
     keyStatus,
     onsave,
+    subnets,
+    onadd,
+    onremove,
   }: {
     hasKey: boolean
     keyStatus: string
     onsave: (key: string) => Promise<boolean>
+    subnets: string[]
+    onadd: (subnet: string) => Promise<boolean>
+    onremove: (subnet: string) => void
   } = $props()
 
   let key = $state('')
@@ -50,6 +58,11 @@
         <button class="ghost" onclick={() => onsave('')}>Remove key</button>
       {/if}
     </div>
+  </div>
+
+  <div class="group">
+    <h3>Networks</h3>
+    <NetworkPanel {subnets} {onadd} {onremove} />
   </div>
 </section>
 
