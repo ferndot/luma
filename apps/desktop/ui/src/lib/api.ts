@@ -40,8 +40,12 @@ export type Effect =
   | { kind: 'gradient'; stops: Rgb[]; length: number; speed: number }
   | { kind: 'band'; color: Rgb; background: Rgb; width: number; period: number }
   | { kind: 'pulse'; from: Rgb; to: Rgb; period: number }
+  | { kind: 'path'; points: PathPoint[]; speed: number }
   | { kind: 'microphone' }
   | { kind: 'screen' }
+
+// A point on a path: where it is in the room (0 to 1 both ways), its color, and its brightness (0 to 1).
+export type PathPoint = { at: [number, number]; color: Rgb; brightness: number }
 
 export type NamedEffect = { id: string; name: string; effect: Effect }
 
@@ -53,6 +57,7 @@ export function swatch(e: Effect): string {
     case 'gradient': return css(e.stops[0] ?? [255, 255, 255])
     case 'band': return css(e.color)
     case 'pulse': return css(e.to)
+    case 'path': return css(e.points[0]?.color ?? [255, 255, 255])
     default: return '#9ca3af'
   }
 }

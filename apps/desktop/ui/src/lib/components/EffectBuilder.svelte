@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { swatch, type Effect, type NamedEffect, type Rgb } from '../api'
+  import { draggable } from '@neodrag/svelte'
+  import { swatch, type Effect, type NamedEffect, type PathPoint, type Rgb } from '../api'
   import Button from './Button.svelte'
 
   let {
@@ -23,6 +24,7 @@
     { kind: 'gradient', label: 'Gradient', about: 'Colors blend along the room and scroll. Rainbow is one.' },
     { kind: 'band', label: 'Band', about: 'A band of color sweeps across the room. Chase is one.' },
     { kind: 'pulse', label: 'Pulse', about: 'Fades between two colors and back. Breathe is one.' },
+    { kind: 'path', label: 'Path', about: 'A direction through the room. Colors and brightness set along it travel that way.' },
     { kind: 'microphone', label: 'Microphone', about: 'Brightness follows the microphone.' },
     { kind: 'screen', label: 'Screen', about: 'Each spot shows the screen color of its column.' },
   ]
@@ -35,6 +37,14 @@
       case 'gradient': return { kind, stops: [[255, 0, 0], [0, 0, 255]], length: 1, speed: 0.25 }
       case 'band': return { kind, color: [255, 255, 255], background: [0, 0, 0], width: 0.16, period: 4 }
       case 'pulse': return { kind, from: [0, 0, 0], to: [255, 255, 255], period: 3 }
+      case 'path': return {
+        kind,
+        points: [
+          { at: [0.1, 0.5], color: [255, 0, 0], brightness: 1 },
+          { at: [0.9, 0.5], color: [0, 0, 255], brightness: 1 },
+        ],
+        speed: 0.25,
+      }
       case 'microphone': return { kind }
       case 'screen': return { kind }
     }
@@ -65,6 +75,35 @@
 
   function setKind(e: Event) {
     draft.effect = defaults((e.currentTarget as HTMLSelectElement).value as Effect['kind'])
+  }
+
+  // Path editor state: the room's size on screen, the selected point, and the room-relative pointer.
+  let room: HTMLDivElement
+  let roomW = $state(1)
+  let roomH = $state(1)
+  let sel = $state<number | null>(null)
+
+  // Room position (0 to 1 both ways) of a pointer event.
+  function spot(e: { clientX: number; clientY: number }): [number, number] {
+    const r = room.getBoundingClientRect()
+    const clamp = (v: number) => Math.min(1, Math.max(0, v))
+    return [clamp((e.clientX - r.left) / r.width), clamp((e.clientY - r.top) / r.height)]
+  }
+
+  function addPoint(e: MouseEvent) {
+    if (draft.effect.kind !== 'path' || draft.effect.points.length >= 16) return
+    draft.effect.points.push({ at: spot(e), color: [255, 255, 255], brightness: 1 })
+    sel = draft.effect.points.length - 1
+  }
+
+  function movePoint(i: number, e: PointerEvent) {
+    if (draft.effect.kind === 'path') draft.effect.points[i].at = spot(e)
+  }
+
+  function removePoint(i: number) {
+    if (draft.effect.kind !== 'path' || draft.effect.points.length <= 2) return
+    draft.effect.points.splice(i, 1)
+    sel = null
   }
 
   async function save(e: SubmitEvent) {
@@ -172,6 +211,63 @@
           <label class="field num"><span class="muted">Seconds per fade in and out</span>
             <input type="number" min="0.5" max="60" step="0.5" bind:value={p.period} />
           </label>
+        {:else if draft.effect.kind === 'path'}
+          {@const pa = draft.effect}
+          <div class="field">
+            <span class="muted">The arrow runs from the first point to the last: that is the direction. Colors and brightness travel along it. Click to add a point, drag to move it, pick one to set its color and brightness.</span>
+            <div
+              class="room"
+              bind:this={room}
+              bind:clientWidth={roomW}
+              bind:clientHeight={roomH}
+              role="application"
+              aria-label="Path editor"
+              onclick={(e) => e.target === e.currentTarget && addPoint(e)}
+            >
+              {#if pa.points.length >= 2}
+                {@const a = pa.points[0].at}
+                {@const b = pa.points[pa.points.length - 1].at}
+                <svg class="dir" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+                  <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                      <path d="M0 0L10 5L0 10z" fill="currentColor" />
+                    </marker>
+                  </defs>
+                  <line x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke" marker-end="url(#arrow)" />
+                </svg>
+              {/if}
+              {#each pa.points as p, i (i)}
+                <div
+                  class="pt"
+                  class:sel={sel === i}
+                  role="button"
+                  tabindex="-1"
+                  aria-label="Point {i + 1}"
+                  style="background: {hex(p.color)}; opacity: {0.3 + 0.7 * p.brightness}"
+                  use:draggable={{
+                    position: { x: p.at[0] * roomW, y: p.at[1] * roomH },
+                    bounds: 'parent',
+                    onDragStart: () => (sel = i),
+                    onDrag: ({ event }) => movePoint(i, event),
+                  }}
+                ></div>
+              {/each}
+            </div>
+          </div>
+          {#if sel !== null && pa.points[sel]}
+            {@const p = pa.points[sel]}
+            <div class="row">
+              <span class="muted">Point {sel + 1}</span>
+              <input type="color" value={hex(p.color)} aria-label="Point color" oninput={(e) => (p.color = rgb(e.currentTarget.value))} />
+              <label class="row"><span class="muted">Brightness</span>
+                <input type="range" min="0" max="1" step="0.05" bind:value={p.brightness} />
+              </label>
+              <Button variant="ghost" size="sm" onclick={() => removePoint(sel!)} disabled={pa.points.length <= 2}>Remove point</Button>
+            </div>
+          {/if}
+          <label class="field num"><span class="muted">Speed (lengths per second, negative reverses)</span>
+            <input type="number" min="-4" max="4" step="0.05" bind:value={pa.speed} />
+          </label>
         {/if}
 
         <div class="row actions">
@@ -275,6 +371,37 @@
     gap: 10px;
   }
   .actions { margin-top: 4px; }
+  .room {
+    position: relative;
+    width: 100%;
+    max-width: 520px;
+    height: 220px;
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    overflow: hidden;
+    touch-action: none;
+  }
+  .pt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+    border: 2px solid var(--text);
+    border-radius: 50%;
+    cursor: grab;
+  }
+  .pt.sel { box-shadow: 0 0 0 3px var(--accent); }
+  .dir {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    color: var(--muted);
+    pointer-events: none;
+  }
   .empty { max-width: 480px; }
   .empty p { margin: 8px 0 0; }
   .muted {

@@ -21,6 +21,7 @@
     "vite": "^8.3.5"
   },
   "dependencies": {
+    "@neodrag/svelte": "^2.3.3",
     "@tauri-apps/api": "^2.12.4"
   }
 }
