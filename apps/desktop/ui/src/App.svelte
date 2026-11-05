@@ -1,5 +1,15 @@
 <script lang="ts">
-  import { getState, setMode, findLights, setSelected, start, stop, type AppState } from './lib/api'
+  import {
+    getState,
+    setMode,
+    findLights,
+    addSubnet,
+    removeSubnet,
+    setSelected,
+    start,
+    stop,
+    type AppState,
+  } from './lib/api'
 
   const modes = [
     { name: 'microphone', label: 'Microphone', color: '#ff4fa3' },
@@ -80,6 +90,18 @@
     run(() => (st?.running ? stop() : start()))
   }
 
+  let newSubnet = $state('')
+
+  function submitSubnet(e: SubmitEvent) {
+    e.preventDefault()
+    const value = newSubnet
+    run(async () => {
+      await addSubnet(value)
+      newSubnet = ''
+      await findLights()
+    })
+  }
+
   let statusText = $derived(error || st?.status || 'Connecting...')
 </script>
 
@@ -147,7 +169,22 @@
       </div>
     </div>
     {#if st?.subnet}
-      <p class="subnet">Scanning <code>{st.subnet}</code> on your network</p>
+      <p class="subnet">Scanning <code>{st.subnet}</code></p>
+    {/if}
+
+    <form class="add-subnet" onsubmit={submitSubnet}>
+      <input bind:value={newSubnet} placeholder="Add a subnet, e.g. 192.168.10" aria-label="Subnet to add" />
+      <button type="submit" disabled={!newSubnet.trim()}>Add</button>
+    </form>
+    {#if st && st.subnets.length > 0}
+      <ul class="chips">
+        {#each st.subnets as s (s)}
+          <li>
+            <code>{s}.0/24</code>
+            <button class="chip-remove" aria-label="Remove {s}.0/24" onclick={() => run(() => removeSubnet(s))}>×</button>
+          </li>
+        {/each}
+      </ul>
     {/if}
 
     {#if lightCount > 0}
@@ -337,6 +374,61 @@
   }
   .subnet code {
     font-variant-numeric: tabular-nums;
+  }
+  .add-subnet {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .add-subnet input {
+    flex: 1 1 200px;
+    min-width: 0;
+    font: inherit;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 10px 14px;
+    background: rgba(10, 4, 22, 0.55);
+    color: inherit;
+  }
+  .add-subnet button {
+    font: inherit;
+    font-weight: 700;
+    border: none;
+    border-radius: 14px;
+    padding: 10px 18px;
+    background: #7c3aed;
+    color: #fff;
+    cursor: pointer;
+  }
+  .add-subnet button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .chips {
+    list-style: none;
+    margin: 0 0 14px;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .chips li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 4px 12px;
+    border-radius: 999px;
+    background: rgba(88, 28, 135, 0.4);
+    font-size: 0.85rem;
+  }
+  .chip-remove {
+    border: none;
+    background: transparent;
+    color: #e9ddff;
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0 4px;
   }
 
   .lights {

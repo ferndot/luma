@@ -1,6 +1,6 @@
 //! Tauri-free state and command logic, so it can be unit-tested without a window.
 use luma_engine::{LightSpec, Mode, Show};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,18 @@ pub struct AppState {
     pub subnet: String,
     /// IPs of lights found in an earlier run; their subnets are scanned too.
     pub remembered: Vec<String>,
-    /// Where `remembered` is saved, when the app has a data folder.
+    /// Subnets the user added by hand (e.g. an IoT network the PC can route to), as "a.b.c".
+    pub custom_subnets: Vec<String>,
+    /// Where the saved settings are kept, when the app has a data folder.
     pub store_path: Option<PathBuf>,
+}
+
+/// What is saved between runs.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Saved {
+    pub lights: Vec<String>,
+    pub subnets: Vec<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -40,6 +50,7 @@ pub struct StateView {
     pub running: bool,
     pub scanning: bool,
     pub subnet: String,
+    pub subnets: Vec<String>,
     pub mode: String,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
@@ -103,21 +114,54 @@ pub fn prefix_of_ip(ip: &str) -> Option<String> {
     (parts.len() == 4).then(|| parts[..3].join("."))
 }
 
-/// Loads the IPs of lights found in an earlier run. A missing or unreadable file means none.
-pub fn load_remembered(path: &Path) -> Vec<String> {
+/// Loads the saved settings. A missing or unreadable file means none.
+pub fn load_saved(path: &Path) -> Saved {
     fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
 
-/// Saves the IPs of the known lights so the next run can scan their subnets.
-pub fn save_remembered(state: &AppState) {
+/// Saves the known light IPs and the custom subnets so the next run can scan them.
+pub fn save_state(state: &AppState) {
     let Some(path) = &state.store_path else { return };
-    let ips: Vec<&str> = state.known.iter().map(|l| l.ip.as_str()).collect();
+    let saved = Saved {
+        lights: state.known.iter().map(|l| l.ip.clone()).collect(),
+        subnets: state.custom_subnets.clone(),
+    };
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Ok(text) = serde_json::to_string(&ips) {
+    if let Ok(text) = serde_json::to_string_pretty(&saved) {
         let _ = fs::write(path, text);
     }
+}
+
+/// Accepts "192.168.10", "192.168.10.0/24" or any address in that /24, and returns "192.168.10".
+pub fn normalize_subnet(input: &str) -> Result<String, String> {
+    let err = || format!("'{}' is not a subnet. Enter the first three numbers, like 192.168.10", input.trim());
+    let head = input.trim().split('/').next().unwrap_or("");
+    let parts: Vec<&str> = head.split('.').collect();
+    let octets = match parts.len() {
+        3 => &parts[..],
+        4 => &parts[..3],
+        _ => return Err(err()),
+    };
+    if octets.iter().all(|p| p.parse::<u8>().is_ok()) {
+        Ok(octets.join("."))
+    } else {
+        Err(err())
+    }
+}
+
+/// Adds a subnet typed by the user; it is scanned on the next scan and saved.
+pub fn add_subnet(state: &mut AppState, input: &str) -> Result<(), String> {
+    let prefix = normalize_subnet(input)?;
+    if !state.custom_subnets.contains(&prefix) {
+        state.custom_subnets.push(prefix);
+    }
+    Ok(())
+}
+
+pub fn remove_subnet(state: &mut AppState, prefix: &str) {
+    state.custom_subnets.retain(|p| p != prefix);
 }
 
 /// Detects the local subnets and scans them for lights, unless a scan is already running.
@@ -125,7 +169,8 @@ pub fn begin_discovery(state: &mut AppState) -> Result<(), String> {
     if state.discovery.is_some() {
         return Ok(());
     }
-    let mut extra: Vec<String> = state.remembered.iter().filter_map(|ip| prefix_of_ip(ip)).collect();
+    let mut extra: Vec<String> = state.custom_subnets.clone();
+    extra.extend(state.remembered.iter().filter_map(|ip| prefix_of_ip(ip)));
     extra.extend(state.known.iter().filter_map(|l| prefix_of_ip(&l.ip)));
     let prefixes = luma_engine::local_prefixes(&extra);
     if prefixes.is_empty() {
@@ -178,6 +223,7 @@ pub fn view(state: &AppState) -> StateView {
         running,
         scanning: state.discovery.is_some(),
         subnet: state.subnet.clone(),
+        subnets: state.custom_subnets.clone(),
         mode,
         status,
         preview,
@@ -276,6 +322,26 @@ mod tests {
         let mut s = with_lights();
         set_selected(&mut s, &[]);
         assert_eq!(start(&s), Err("Select at least one light".to_string()));
+    }
+
+    #[test]
+    fn subnet_input_is_normalized() {
+        assert_eq!(normalize_subnet("192.168.10"), Ok("192.168.10".into()));
+        assert_eq!(normalize_subnet(" 192.168.10.0/24 "), Ok("192.168.10".into()));
+        assert_eq!(normalize_subnet("10.0.5.77"), Ok("10.0.5".into()));
+        assert!(normalize_subnet("192.168").is_err());
+        assert!(normalize_subnet("192.168.300").is_err());
+        assert!(normalize_subnet("lights").is_err());
+    }
+
+    #[test]
+    fn added_subnets_are_kept_once() {
+        let mut s = AppState::default();
+        add_subnet(&mut s, "192.168.10.0/24").unwrap();
+        add_subnet(&mut s, "192.168.10").unwrap();
+        assert_eq!(s.custom_subnets, vec!["192.168.10"]);
+        remove_subnet(&mut s, "192.168.10");
+        assert!(s.custom_subnets.is_empty());
     }
 
     #[test]

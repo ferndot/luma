@@ -14,9 +14,25 @@ fn lock(app: &Shared) -> Result<MutexGuard<'_, AppState>, String> {
 fn get_state(app: State<'_, Shared>) -> Result<StateView, String> {
     let mut s = lock(&app)?;
     if logic::poll_discovery(&mut s) {
-        logic::save_remembered(&s);
+        logic::save_state(&s);
     }
     Ok(logic::view(&s))
+}
+
+#[tauri::command]
+fn add_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::add_subnet(&mut s, &subnet)?;
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::remove_subnet(&mut s, &subnet);
+    logic::save_state(&s);
+    Ok(())
 }
 
 #[tauri::command]
@@ -54,13 +70,20 @@ fn stop(app: State<'_, Shared>) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            // Lights found in earlier runs are kept in the app's data folder.
-            let store_path = app.path().app_data_dir().ok().map(|dir| dir.join("lights.json"));
-            let remembered = store_path.as_deref().map(logic::load_remembered).unwrap_or_default();
-            app.manage(Mutex::new(AppState { store_path, remembered, ..Default::default() }));
+            // Lights and added subnets from earlier runs are kept in the app's data folder.
+            let store_path = app.path().app_data_dir().ok().map(|dir| dir.join("settings.json"));
+            let saved = store_path.as_deref().map(logic::load_saved).unwrap_or_default();
+            app.manage(Mutex::new(AppState {
+                store_path,
+                remembered: saved.lights,
+                custom_subnets: saved.subnets,
+                ..Default::default()
+            }));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_state, set_mode, find_lights, set_selected, start, stop])
+        .invoke_handler(tauri::generate_handler![
+            get_state, set_mode, find_lights, add_subnet, remove_subnet, set_selected, start, stop
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Luma");
 }
