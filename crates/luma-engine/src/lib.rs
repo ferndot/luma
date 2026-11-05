@@ -199,6 +199,96 @@ pub fn find_lights(prefixes: Vec<String>) -> mpsc::Receiver<Result<Vec<LightSpec
     rx
 }
 
+/// Reads each light's power and color. Lights that don't answer are missing from the map.
+pub fn statuses(ips: &[String], wait: Duration) -> Result<BTreeMap<String, (bool, Rgb)>, String> {
+    luma_govee::lan::statuses(ips, wait)
+}
+
+/// Turns a light off now. Strip lights go black and leave razer mode first.
+pub fn off(spec: &LightSpec) {
+    if spec.razer {
+        let mut light = RazerLight::new(&spec.ip, spec.segments);
+        let _ = light.show(&vec![(0, 0, 0); spec.segments]);
+        let _ = light.close();
+        // The light ignores power commands until it has left razer mode.
+        std::thread::sleep(RAZER_SETTLE);
+    }
+    power_off(&spec.ip);
+}
+
+/// Puts a light back to the power and color it had before. `None` means it was unknown, so it is left off.
+pub fn restore(spec: &LightSpec, prior: Option<(bool, Rgb)>) {
+    if spec.razer {
+        let _ = RazerLight::new(&spec.ip, spec.segments).close();
+        std::thread::sleep(RAZER_SETTLE);
+    }
+    match prior {
+        Some((true, (r, g, b))) => {
+            let color = json!({ "msg": { "cmd": "colorwc", "data": { "color": { "r": r, "g": g, "b": b }, "colorTemInKelvin": 0 } } });
+            let _ = lan::send(&spec.ip, &color);
+            let on = json!({ "msg": { "cmd": "turn", "data": { "value": 1 } } });
+            let _ = lan::send(&spec.ip, &on);
+        }
+        _ => power_off(&spec.ip),
+    }
+}
+
+/// Time for a light to leave or enter razer mode before it takes another command.
+const RAZER_SETTLE: Duration = Duration::from_millis(150);
+
+/// Sends the power-off command. Closing razer mode alone can leave the light on its last state.
+fn power_off(ip: &str) {
+    let off = json!({ "msg": { "cmd": "turn", "data": { "value": 0 } } });
+    let _ = lan::send(ip, &off);
+}
+
+fn power_on(ip: &str) {
+    let on = json!({ "msg": { "cmd": "turn", "data": { "value": 1 } } });
+    let _ = lan::send(ip, &on);
+}
+
+/// A light held on one color until `end` is called.
+pub struct Lit {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Lit {
+    /// Stops holding the light. Returns once the background thread has finished sending.
+    pub fn end(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Lights one device in a solid color, resending it while held, until `Lit::end`.
+pub fn light_up(spec: LightSpec, color: Rgb) -> Lit {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let mut light: Box<dyn LightPort> = if spec.razer {
+            Box::new(RazerLight::new(&spec.ip, spec.segments))
+        } else {
+            Box::new(WholeLight::new(&spec.ip))
+        };
+        let frame = vec![color; light.segments()];
+        if spec.razer {
+            // Razer frames don't power a light on by themselves, so turn it on first.
+            power_on(&spec.ip);
+            std::thread::sleep(RAZER_SETTLE);
+        }
+        while !flag.load(Ordering::SeqCst) {
+            if light.show(&frame).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    });
+    Lit { stop, handle: Some(handle) }
+}
+
 fn engine_thread(specs: Vec<LightSpec>, show: &Show) -> Result<(), String> {
     // Power every light on at once so one that was off shows the show; turning on a lit light is a no-op.
     let on = json!({ "msg": { "cmd": "turn", "data": { "value": 1 } } });

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Button from './Button.svelte'
+
   let {
     subnets,
     onadd,
@@ -24,7 +26,7 @@
 
   <form class="add" onsubmit={submit}>
     <input bind:value placeholder="192.168.10" aria-label="Network to add" />
-    <button type="submit" disabled={!value.trim()}>Add</button>
+    <Button type="submit" variant="primary" disabled={!value.trim()}>Add</Button>
   </form>
 
   {#if subnets.length > 0}
@@ -32,7 +34,7 @@
       {#each subnets as s (s)}
         <li>
           <code>{s}.0/24</code>
-          <button class="remove" aria-label="Remove {s}.0/24" onclick={() => onremove(s)}>Remove</button>
+          <Button variant="ghost" size="sm" aria-label="Remove {s}.0/24" onclick={() => onremove(s)}>Remove</Button>
         </li>
       {/each}
     </ul>
@@ -54,17 +56,6 @@
     background: var(--bg);
     color: var(--text);
   }
-  .add button,
-  .remove {
-    padding: 6px 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--raised);
-  }
-  .add button:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
   .list {
     list-style: none;
     margin: 10px 0 0;
@@ -82,12 +73,4 @@
     border-radius: 6px;
     background: var(--bg);
   }
-  .remove {
-    padding: 2px 8px;
-    font-size: 12px;
-    color: var(--muted);
-    background: transparent;
-    border-color: transparent;
-  }
-  .remove:hover { color: var(--text); }
 </style>

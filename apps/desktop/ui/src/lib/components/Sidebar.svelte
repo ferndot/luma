@@ -1,31 +1,56 @@
 <script lang="ts">
   import type { Group } from '../api'
+  import Button from './Button.svelte'
 
   export type Page = { kind: 'home' } | { kind: 'group'; id: string } | { kind: 'settings' }
 
   let {
     groups,
     page,
+    scanning,
     onnav,
+    oncreate,
+    onrescan,
   }: {
     groups: Group[]
     page: Page
+    scanning: boolean
     onnav: (page: Page) => void
+    oncreate: (name: string) => Promise<boolean>
+    onrescan: () => void
   } = $props()
+
+  let name = $state('')
+  let dialog: HTMLDialogElement
+  let input: HTMLInputElement
+
+  function openDialog() {
+    name = ''
+    dialog.showModal()
+    input.focus()
+  }
+
+  async function submit(e: SubmitEvent) {
+    e.preventDefault()
+    if (await oncreate(name)) dialog.close()
+  }
 </script>
 
 <aside class="sidebar">
-  <div class="brand" aria-label="luma">
-    {#each [['l', '#ff4fa3'], ['u', '#ff8a2b'], ['m', '#facc15'], ['a', '#4ade80']] as [ch, color]}
-      <span style="color: {color}">{ch}</span>
-    {/each}
-  </div>
+  <Button class="new-btn" onclick={openDialog}>+ New group</Button>
+
+  <dialog bind:this={dialog} class="modal" aria-labelledby="new-group-title">
+    <form method="dialog" onsubmit={submit}>
+      <h2 id="new-group-title">New group</h2>
+      <input bind:this={input} bind:value={name} placeholder="e.g. Desk" aria-label="Group name" maxlength="40" />
+      <div class="modal-actions">
+        <Button type="button" onclick={() => dialog.close()}>Cancel</Button>
+        <Button type="submit" variant="primary" disabled={!name.trim()}>Create</Button>
+      </div>
+    </form>
+  </dialog>
 
   <nav class="nav">
-    <button class="item" class:active={page.kind === 'home'} onclick={() => onnav({ kind: 'home' })}>
-      All groups
-    </button>
-
     {#if groups.length > 0}
       <h2 class="section-title">Groups</h2>
       {#each groups as g (g.id)}
@@ -37,10 +62,15 @@
           {g.name}
         </button>
       {/each}
+    {:else}
+      <p class="muted">No groups yet. Type a name above to make one.</p>
     {/if}
   </nav>
 
   <div class="bottom">
+    <button class="item" onclick={onrescan} disabled={scanning}>
+      {scanning ? 'Finding lights…' : 'Find lights'}
+    </button>
     <button class="item" class:active={page.kind === 'settings'} onclick={() => onnav({ kind: 'settings' })}>
       Settings
     </button>
@@ -51,19 +81,45 @@
   .sidebar {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
     min-height: 0;
     padding: 14px 10px;
     border-right: 1px solid var(--line);
     background: var(--surface);
     overflow: hidden;
   }
-  .brand {
-    padding: 0 8px;
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: 0.06em;
-    user-select: none;
+  .modal {
+    width: min(340px, 90vw);
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  }
+  .modal::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .modal form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .modal h2 {
+    margin: 0;
+    font-size: 16px;
+  }
+  .modal input {
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
   .nav {
     display: flex;
@@ -73,10 +129,19 @@
     overflow-y: auto;
   }
   .nav .section-title {
-    margin: 14px 8px 6px;
+    margin: 6px 8px;
+  }
+  .muted {
+    margin: 4px 8px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.4;
   }
   .bottom {
     margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     border-top: 1px solid var(--line);
     padding-top: 10px;
   }
@@ -92,7 +157,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .item:hover { background: rgba(255, 255, 255, 0.05); }
+  .item:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+  .item:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
   .item.active {
     background: var(--raised);
     font-weight: 600;

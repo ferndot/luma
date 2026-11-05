@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type Discovery = Receiver<Result<Vec<LightSpec>, String>>;
 pub type NameFetch = Receiver<Result<BTreeMap<String, String>, String>>;
@@ -33,6 +33,8 @@ pub struct AppState {
     pub cloud_names: BTreeMap<String, String>,
     /// Named sets of lights, by device id.
     pub groups: Vec<Group>,
+    /// The light being pressed, if any, with the state every group member had before.
+    pub session: Option<Session>,
     /// Govee cloud API key, used only to read device names.
     pub api_key: Option<String>,
     pub names_fetch: Option<NameFetch>,
@@ -267,15 +269,88 @@ pub fn set_group_position(state: &mut AppState, id: &str, device: &str, x: f32, 
     Ok(())
 }
 
-/// Selects the group's known lights and starts the show on them with the current mode.
-pub fn start_group(state: &mut AppState, id: &str) -> Result<(), String> {
-    let members = find_group(state, id)?.members.clone();
-    let ips: Vec<String> = state.known.iter().filter(|l| members.contains(&l.id)).map(|l| l.ip.clone()).collect();
-    if ips.is_empty() {
+/// The group's known lights in the order a scene runs them: left to right, then top to bottom.
+/// Lights without a position go last.
+pub fn scene_order(state: &mut AppState, id: &str) -> Result<Vec<LightSpec>, String> {
+    let group = find_group(state, id)?.clone();
+    let mut lights: Vec<(f32, f32, LightSpec)> = state
+        .known
+        .iter()
+        .filter(|l| group.members.contains(&l.id))
+        .map(|l| {
+            let [x, y] = group.positions.get(&l.id).copied().unwrap_or([f32::MAX, f32::MAX]);
+            (x, y, l.clone())
+        })
+        .collect();
+    if lights.is_empty() {
         return Err("Add lights to the group first".into());
     }
-    set_selected(state, &ips);
-    start(state)
+    lights.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    Ok(lights.into_iter().map(|(_, _, l)| l).collect())
+}
+
+/// Starts the show on the group's lights, in room order, with the current mode.
+pub fn start_group(state: &mut AppState, id: &str) -> Result<(), String> {
+    if state.show.is_running() {
+        return Err("The show is already running".into());
+    }
+    let specs = scene_order(state, id)?;
+    state.show.start(specs)
+}
+
+/// A press on a light. Holds the pressed light on its color and remembers how every group member was,
+/// so release can put them all back.
+pub struct Session {
+    pub id: String,
+    pub members: Vec<(LightSpec, Option<(bool, (u8, u8, u8))>)>,
+    pub lit: luma_engine::Lit,
+}
+
+/// Ends the current press: stops the lit light and restores every member to its prior state.
+fn end_session(state: &mut AppState) {
+    if let Some(session) = state.session.take() {
+        session.lit.end();
+        for (spec, prior) in &session.members {
+            luma_engine::restore(spec, *prior);
+        }
+    }
+}
+
+/// Lights a device in a solid color while pressed. The rest of its group goes off.
+/// Not while a show is running.
+pub fn light_device(state: &mut AppState, group: &str, id: &str, color: [u8; 3]) -> Result<(), String> {
+    if state.show.is_running() {
+        return Err("Stop the scene to light lights".into());
+    }
+    let member_ids = find_group(state, group)?.members.clone();
+    if !member_ids.iter().any(|m| m == id) {
+        return Err("That light is not in the group".into());
+    }
+    let specs: Vec<LightSpec> = state.known.iter().filter(|l| member_ids.contains(&l.id)).cloned().collect();
+    let lit_spec = specs.iter().find(|l| l.id == id).ok_or("That light is not known")?.clone();
+
+    // Finish the previous press first so the states read below are the real ones.
+    end_session(state);
+    let ips: Vec<String> = specs.iter().map(|l| l.ip.clone()).collect();
+    let priors = luma_engine::statuses(&ips, Duration::from_millis(400)).unwrap_or_default();
+    let members: Vec<(LightSpec, Option<(bool, (u8, u8, u8))>)> =
+        specs.into_iter().map(|l| {
+            let prior = priors.get(&l.ip).copied();
+            (l, prior)
+        }).collect();
+    for (spec, _) in members.iter().filter(|(l, _)| l.id != id) {
+        luma_engine::off(spec);
+    }
+    let lit = luma_engine::light_up(lit_spec, (color[0], color[1], color[2]));
+    state.session = Some(Session { id: id.to_string(), members, lit });
+    Ok(())
+}
+
+/// Ends the press on this device, if it is the one being pressed.
+pub fn release_device(state: &mut AppState, id: &str) {
+    if state.session.as_ref().is_some_and(|s| s.id == id) {
+        end_session(state);
+    }
 }
 
 pub fn delete_group(state: &mut AppState, id: &str) {
@@ -525,17 +600,25 @@ mod tests {
     }
 
     #[test]
-    fn starting_a_group_selects_its_devices_and_needs_members() {
+    fn scene_needs_members_and_keeps_only_known_ones() {
         let mut s = with_lights();
         let id = create_group(&mut s, "Desk").unwrap();
-        assert!(start_group(&mut s, &id).is_err());
+        assert!(scene_order(&mut s, &id).is_err());
         set_group_members(&mut s, &id, &["id-10.0.0.2".into(), "unknown".into()]).unwrap();
         assert_eq!(s.groups[0].members, vec!["id-10.0.0.2"]);
-        set_selected(&mut s, &["10.0.0.1".into()]);
-        // Starting spawns the show thread; selection is what we check here.
-        let _ = start_group(&mut s, &id);
-        assert_eq!(s.selected.iter().collect::<Vec<_>>(), vec!["10.0.0.2"]);
-        stop(&s);
+        let order: Vec<String> = scene_order(&mut s, &id).unwrap().into_iter().map(|l| l.id).collect();
+        assert_eq!(order, vec!["id-10.0.0.2"]);
+    }
+
+    #[test]
+    fn scene_runs_left_to_right_then_top_to_bottom() {
+        let mut s = with_lights();
+        let id = create_group(&mut s, "Room").unwrap();
+        set_group_members(&mut s, &id, &["id-10.0.0.1".into(), "id-10.0.0.2".into()]).unwrap();
+        set_group_position(&mut s, &id, "id-10.0.0.1", 0.9, 0.1).unwrap();
+        set_group_position(&mut s, &id, "id-10.0.0.2", 0.1, 0.9).unwrap();
+        let order: Vec<String> = scene_order(&mut s, &id).unwrap().into_iter().map(|l| l.id).collect();
+        assert_eq!(order, vec!["id-10.0.0.2", "id-10.0.0.1"]);
     }
 
     #[test]

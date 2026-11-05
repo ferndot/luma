@@ -9,6 +9,8 @@
     renameGroup,
     setGroupMembers,
     setGroupPosition,
+    lightDevice,
+    releaseDevice,
     startGroup,
     deleteGroup,
     setApiKey,
@@ -16,7 +18,7 @@
     type AppState,
   } from './lib/api'
   import Sidebar, { type Page } from './lib/components/Sidebar.svelte'
-  import GroupsPage from './lib/components/GroupsPage.svelte'
+  import Titlebar from './lib/components/Titlebar.svelte'
   import GroupDetail from './lib/components/GroupDetail.svelte'
   import Settings from './lib/components/Settings.svelte'
 
@@ -100,7 +102,16 @@
 </script>
 
 <div class="app">
-  <Sidebar groups={st?.groups ?? []} {page} onnav={(p) => (page = p)} />
+  <Titlebar />
+
+  <Sidebar
+    groups={st?.groups ?? []}
+    {page}
+    scanning={st?.scanning ?? false}
+    onnav={(p) => (page = p)}
+    oncreate={newGroup}
+    onrescan={() => run(() => findLights())}
+  />
 
   <main class="content">
     {#if error}
@@ -126,6 +137,8 @@
         onrename={(name) => run(() => renameGroup(openGroup.id, name))}
         onmembers={(members) => run(() => setGroupMembers(openGroup.id, members))}
         onposition={(device, x, y) => run(() => setGroupPosition(openGroup.id, device, x, y))}
+        onlight={(device, color) => run(() => lightDevice(openGroup.id, device, color))}
+        onrelease={(device) => run(() => releaseDevice(device))}
         onstart={() => run(() => startGroup(openGroup.id))}
         onstop={() => run(() => stop())}
         onpick={(name) => run(() => setMode(name))}
@@ -135,13 +148,9 @@
         }}
       />
     {:else}
-      <GroupsPage
-        groups={st?.groups ?? []}
-        scanning={st?.scanning ?? false}
-        oncreate={newGroup}
-        onopen={(id) => (page = { kind: 'group', id })}
-        onrescan={() => run(() => findLights())}
-      />
+      <div class="welcome">
+        <p>Pick a group in the sidebar, or type a name there to make one.</p>
+      </div>
     {/if}
   </main>
 </div>
@@ -151,6 +160,7 @@
     height: 100vh;
     display: grid;
     grid-template-columns: 200px minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     overflow: hidden;
   }
   .content {
@@ -159,6 +169,13 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+  }
+  .welcome {
+    padding: 24px;
+    color: var(--muted);
+  }
+  .welcome p {
+    margin: 0;
   }
   .error {
     margin: 0;

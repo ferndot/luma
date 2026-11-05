@@ -75,6 +75,33 @@ mod tests {
     }
 }
 
+/// Asks each light for its power and color ("devStatus"). Lights that don't answer within `wait` are left out.
+/// Keyed by IP: (on, (r, g, b)).
+pub fn statuses(ips: &[String], wait: Duration) -> Result<BTreeMap<String, (bool, (u8, u8, u8))>, String> {
+    let rx = UdpSocket::bind(("0.0.0.0", REPLY_PORT)).map_err(|e| format!("cannot read light state: {e}"))?;
+    rx.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
+    let tx = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let ask = json!({ "msg": { "cmd": "devStatus", "data": {} } }).to_string();
+    for ip in ips {
+        let _ = tx.send_to(ask.as_bytes(), (ip.as_str(), CONTROL_PORT));
+    }
+    let mut found = BTreeMap::new();
+    let deadline = Instant::now() + wait;
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        let Ok((n, src)) = rx.recv_from(&mut buf) else { continue };
+        let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) else { continue };
+        if v["msg"]["cmd"] != "devStatus" {
+            continue;
+        }
+        let d = &v["msg"]["data"];
+        let on = d["onOff"].as_u64() == Some(1);
+        let channel = |k: &str| d["color"][k].as_u64().unwrap_or(0) as u8;
+        found.insert(src.ip().to_string(), (on, (channel("r"), channel("g"), channel("b"))));
+    }
+    Ok(found)
+}
+
 pub fn send(ip: &str, msg: &Value) -> std::io::Result<()> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.send_to(msg.to_string().as_bytes(), (ip, CONTROL_PORT))?;

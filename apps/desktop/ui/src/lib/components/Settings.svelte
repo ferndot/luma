@@ -1,5 +1,6 @@
 <script lang="ts">
   import NetworkPanel from './NetworkPanel.svelte'
+  import Button from './Button.svelte'
 
   let {
     hasKey,
@@ -46,16 +47,16 @@
         autocomplete="off"
         spellcheck="false"
       />
-      <button type="button" class="ghost" onclick={() => (showKey = !showKey)}>
+      <Button type="button" variant="ghost" onclick={() => (showKey = !showKey)}>
         {showKey ? 'Hide' : 'Show'}
-      </button>
-      <button type="submit" disabled={!key.trim()}>Save</button>
+      </Button>
+      <Button type="submit" variant="primary" disabled={!key.trim()}>Save</Button>
     </form>
 
     <div class="row">
       <p class="muted">{hasKey ? 'A key is saved.' : 'No key saved.'} {keyStatus}</p>
       {#if hasKey}
-        <button class="ghost" onclick={() => onsave('')}>Remove key</button>
+        <Button variant="ghost" size="sm" onclick={() => onsave('')}>Remove key</Button>
       {/if}
     </div>
   </div>
@@ -98,21 +99,6 @@
     background: var(--surface);
     color: var(--text);
     font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  }
-  .key-row button,
-  .row button {
-    padding: 6px 12px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--raised);
-  }
-  .key-row button:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-  .ghost {
-    background: transparent !important;
-    color: var(--muted);
   }
   .row {
     display: flex;

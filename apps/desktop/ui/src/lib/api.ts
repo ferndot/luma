@@ -54,7 +54,10 @@ export const setGroupMembers = (id: string, members: string[]) =>
   invoke<void>('set_group_members', { id, members })
 export const setGroupPosition = (id: string, device: string, x: number, y: number) =>
   invoke<void>('set_group_position', { id, device, x, y })
-export const startGroup = (id: string) => invoke<void>('start_group', { id })
+export const lightDevice = (group: string, device: string, color: [number, number, number]) =>
+  invoke<void>('light_device', { group, device, color })
+export const releaseDevice = (device: string) => invoke<void>('release_device', { device })
+export const startGroup =(id: string) => invoke<void>('start_group', { id })
 export const deleteGroup = (id: string) => invoke<void>('delete_group', { id })
 export const setApiKey = (key: string) => invoke<void>('set_api_key', { key })
 export const stop = () => invoke<void>('stop')

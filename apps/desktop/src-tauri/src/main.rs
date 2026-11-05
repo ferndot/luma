@@ -59,6 +59,19 @@ fn start_group(app: State<'_, Shared>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn light_device(app: State<'_, Shared>, group: String, device: String, color: [u8; 3]) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::light_device(&mut s, &group, &device, color)
+}
+
+#[tauri::command]
+fn release_device(app: State<'_, Shared>, device: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::release_device(&mut s, &device);
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_group(app: State<'_, Shared>, id: String) -> Result<(), String> {
     let mut s = lock(&app)?;
     logic::delete_group(&mut s, &id);
@@ -152,6 +165,8 @@ fn main() {
             set_group_members,
             set_group_position,
             start_group,
+            light_device,
+            release_device,
             delete_group,
             set_selected,
             start,
