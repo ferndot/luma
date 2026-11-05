@@ -2,7 +2,7 @@
 use luma_core::domain::Rgb;
 use luma_core::modes::{mic_frame, screen_frame};
 use luma_core::patterns::NAMES;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,7 +119,7 @@ mod tests {
 use luma_core::adapters::latency::{Delayed, measure};
 use luma_core::app::run_show;
 use luma_core::domain::{LightPort, latest};
-use luma_govee::{razer_light::RazerLight, whole_light::WholeLight};
+use luma_govee::{lan, razer_light::RazerLight, whole_light::WholeLight};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -191,6 +191,15 @@ pub fn find_lights(prefixes: Vec<String>) -> mpsc::Receiver<Result<Vec<LightSpec
 }
 
 fn engine_thread(specs: Vec<LightSpec>, show: &Show) -> Result<(), String> {
+    // Power every light on at once so one that was off shows the show; turning on a lit light is a no-op.
+    let on = json!({ "msg": { "cmd": "turn", "data": { "value": 1 } } });
+    let sent: Vec<std::io::Result<()>> = std::thread::scope(|s| {
+        let handles: Vec<_> = specs.iter().map(|sp| s.spawn(|| lan::send(&sp.ip, &on))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(std::io::Error::other("power-on thread panicked")))).collect()
+    });
+    for r in sent {
+        r.map_err(|e| e.to_string())?;
+    }
     let mut lights: Vec<Box<dyn LightPort>> = Vec::new();
     for s in &specs {
         let light: Box<dyn LightPort> = if s.razer {
