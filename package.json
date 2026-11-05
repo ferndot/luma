@@ -3,7 +3,7 @@
   "private": true,
   "description": "Run the Luma desktop app from the project root. Install UI deps first: pnpm --dir apps/desktop/ui install",
   "scripts": {
-    "dev": "cd apps/desktop/src-tauri && ../ui/node_modules/.bin/tauri dev",
-    "build": "cd apps/desktop/src-tauri && ../ui/node_modules/.bin/tauri build"
+    "dev": "node scripts/tauri.mjs dev",
+    "build": "node scripts/tauri.mjs build"
   }
 }
