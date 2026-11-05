@@ -22,16 +22,32 @@ pub struct LightSpec {
 
 impl Mode {
     pub fn from_name(name: &str) -> Option<Mode> {
-        todo!()
+        let n = name.to_lowercase();
+        match n.as_str() {
+            "microphone" | "mic" => Some(Mode::Mic),
+            "screen" => Some(Mode::Screen),
+            _ => NAMES.iter().find(|(k, _)| *k == n).map(|(k, _)| Mode::Pattern(k)),
+        }
     }
     pub fn label(&self) -> String {
-        todo!()
+        match self {
+            Mode::Mic => "microphone".into(),
+            Mode::Screen => "screen".into(),
+            Mode::Pattern(p) => p.to_string(),
+        }
     }
 }
 
 /// Light specs from discovery JSON values (entries missing "ip" or "sku" are skipped).
 pub fn specs_from_discovery(found: &BTreeMap<String, Value>) -> Vec<LightSpec> {
-    todo!()
+    found
+        .values()
+        .filter_map(|v| {
+            let (ip, sku) = (v.get("ip")?.as_str()?, v.get("sku")?.as_str()?);
+            let cap = luma_govee::capability(sku);
+            Some(LightSpec { sku: sku.into(), ip: ip.into(), razer: cap.razer, segments: cap.segments })
+        })
+        .collect()
 }
 
 /// One frame for `mode`. `level` is the last mic level; `zones` captures the screen on demand.
@@ -42,7 +58,14 @@ pub fn frame_for(
     level: f32,
     zones: impl FnOnce(usize) -> Result<Vec<Rgb>, String>,
 ) -> Result<Vec<Rgb>, String> {
-    todo!()
+    Ok(match mode {
+        Mode::Mic => mic_frame(total, level, t),
+        Mode::Screen => screen_frame(total, &zones(total)?),
+        Mode::Pattern(name) => {
+            let f = NAMES.iter().find(|(k, _)| *k == name).ok_or("unknown pattern")?.1;
+            f(total, t)
+        }
+    })
 }
 
 #[cfg(test)]
