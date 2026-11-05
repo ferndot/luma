@@ -1,5 +1,5 @@
 //! Tauri-free state and command logic, so it can be unit-tested without a window.
-use luma_core::effects::{Effect, builtin_effects};
+use luma_core::effects::{Effect, SequenceStep, builtin_effects};
 use luma_engine::{LightSpec, Placed, Sequence, Show, Step};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,39 +43,18 @@ pub struct AppState {
     pub key_status: String,
     /// Where the saved settings are kept, when the app has a data folder.
     pub store_path: Option<PathBuf>,
-    /// Scenes the user built: presets (one step) and sequences (several).
-    pub scenes: Vec<Scene>,
-    /// The scene currently playing, if one was started.
-    pub active_scene: Option<String>,
-    /// The effect library: built-in effects and the user's own.
+    /// The effect library: built-in effects, the user's own, and sequences of them.
     pub effects: Vec<NamedEffect>,
-    /// The effect currently playing on its own, if one was started.
+    /// The effect currently playing, if one was started.
     pub active_effect: Option<String>,
 }
 
-/// An effect in the library, with the id scenes and the sidebar refer to it by.
+/// An effect in the library, with the id the sidebar and sequences refer to it by.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NamedEffect {
     pub id: String,
     pub name: String,
     pub effect: Effect,
-}
-
-/// One step of a scene: a library effect and how long it runs.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct SceneStep {
-    pub effect: String,
-    pub secs: f32,
-}
-
-/// A named scene. One step is a preset; several steps play in order as a sequence.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Scene {
-    pub id: String,
-    pub name: String,
-    pub steps: Vec<SceneStep>,
-    #[serde(default)]
-    pub repeat: bool,
 }
 
 /// What is saved between runs.
@@ -86,7 +65,6 @@ pub struct Saved {
     pub subnets: Vec<String>,
     pub api_key: Option<String>,
     pub groups: Vec<Group>,
-    pub scenes: Vec<Scene>,
     pub effects: Vec<NamedEffect>,
 }
 
@@ -130,10 +108,7 @@ pub struct StateView {
     pub key_status: String,
     pub groups: Vec<GroupView>,
     pub effects: Vec<NamedEffect>,
-    pub scenes: Vec<Scene>,
-    /// Id of the scene playing, if one is.
-    pub active_scene: Option<String>,
-    /// Id of the effect playing on its own, if one is.
+    /// Id of the effect playing, if one is.
     pub active_effect: Option<String>,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
@@ -167,6 +142,7 @@ pub fn save_effect(state: &mut AppState, mut effect: NamedEffect) -> Result<Stri
         return Err("Effect names need 1 to 40 characters".into());
     }
     effect.effect.check()?;
+    check_steps(&effect.effect, &state.effects)?;
     if state.effects.iter().any(|e| e.id != effect.id && e.name.eq_ignore_ascii_case(&effect.name)) {
         return Err(format!("There is already an effect named '{}'", effect.name));
     }
@@ -196,7 +172,7 @@ pub fn reset_effect(state: &mut AppState, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Deletes one of the user's own effects. Scenes that still use it report that when played.
+/// Deletes one of the user's own effects. Sequences that still use it report that when played.
 pub fn delete_effect(state: &mut AppState, id: &str) -> Result<(), String> {
     if builtin_ids().contains(&id) {
         return Err("Built-in effects can be reset, not deleted".into());
@@ -205,83 +181,71 @@ pub fn delete_effect(state: &mut AppState, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A sequence's steps must each name a library effect, and a sequence cannot hold another sequence.
+fn check_steps(effect: &Effect, library: &[NamedEffect]) -> Result<(), String> {
+    let Effect::Sequence { steps, .. } = effect else { return Ok(()) };
+    for step in steps {
+        match library.iter().find(|e| e.id == step.effect) {
+            None => return Err("A step uses an effect that is not in the library".into()),
+            Some(e) if matches!(e.effect, Effect::Sequence { .. }) => return Err("A sequence cannot use another sequence".into()),
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn effect_named(state: &AppState, id: &str) -> Result<Effect, String> {
     state.effects.iter().find(|e| e.id == id).map(|e| e.effect.clone()).ok_or_else(|| "That effect no longer exists".to_string())
 }
 
-fn set_sequence(state: &AppState, sequence: Sequence) -> Result<(), String> {
-    *state.show.sequence.lock().map_err(|e| e.to_string())? = Some(sequence);
-    Ok(())
+/// The show's sequence for an effect. A sequence's steps are looked up now, so edits to them apply;
+/// any other effect plays as a one-step sequence that repeats.
+fn resolve(state: &AppState, id: &str) -> Result<Sequence, String> {
+    match effect_named(state, id)? {
+        Effect::Sequence { steps, repeat } => {
+            let steps = steps
+                .iter()
+                .map(|s: &SequenceStep| effect_named(state, &s.effect).map(|effect| Step { effect, secs: s.secs }))
+                .collect::<Result<Vec<_>, _>>()?;
+            if steps.iter().any(|s| matches!(s.effect, Effect::Sequence { .. })) {
+                return Err("A sequence cannot use another sequence".into());
+            }
+            Ok(Sequence { steps, repeat })
+        }
+        effect => Ok(Sequence { steps: vec![Step { effect, secs: 1.0 }], repeat: true }),
+    }
 }
 
-/// Plays one effect on the show, repeating, until something else is picked.
+/// Plays an effect on the show. A sequence plays its steps in order; anything else repeats until another is picked.
 pub fn play_effect(state: &mut AppState, id: &str) -> Result<(), String> {
-    let effect = effect_named(state, id)?;
-    set_sequence(state, Sequence { steps: vec![Step { effect, secs: 1.0 }], repeat: true })?;
+    let sequence = resolve(state, id)?;
+    *state.show.sequence.lock().map_err(|e| e.to_string())? = Some(sequence);
     state.active_effect = Some(id.into());
-    state.active_scene = None;
     Ok(())
 }
 
-const MAX_STEPS: usize = 12;
-
-/// Checks a scene before it is stored: a name, 1 to 12 steps, and each step names an effect in the library.
-pub fn check_scene(scene: &Scene, effects: &[NamedEffect]) -> Result<(), String> {
-    let name = scene.name.trim();
-    if name.is_empty() || name.chars().count() > 40 {
-        return Err("Scene names need 1 to 40 characters".into());
-    }
-    if scene.steps.is_empty() || scene.steps.len() > MAX_STEPS {
-        return Err(format!("A scene needs 1 to {MAX_STEPS} steps"));
-    }
-    for step in &scene.steps {
-        if !effects.iter().any(|e| e.id == step.effect) {
-            return Err("A step uses an effect that is not in the library".into());
-        }
-        if !(1.0..=600.0).contains(&step.secs) {
-            return Err("Each step must last between 1 second and 10 minutes".into());
-        }
-    }
-    Ok(())
+/// One preview to draw: an effect on a grid of `cols` by `rows` room spots.
+#[derive(Deserialize)]
+pub struct PreviewRequest {
+    pub effect: Effect,
+    pub cols: usize,
+    pub rows: usize,
 }
 
-/// Stores a scene (new when its id is empty) and returns its id. Names are unique, like group names.
-pub fn save_scene(state: &mut AppState, mut scene: Scene) -> Result<String, String> {
-    scene.name = scene.name.trim().to_string();
-    check_scene(&scene, &state.effects)?;
-    if state.scenes.iter().any(|s| s.id != scene.id && s.name.eq_ignore_ascii_case(&scene.name)) {
-        return Err(format!("There is already a scene named '{}'", scene.name));
-    }
-    if scene.id.is_empty() {
-        scene.id = new_id('s');
-    }
-    match state.scenes.iter_mut().find(|s| s.id == scene.id) {
-        Some(existing) => *existing = scene.clone(),
-        None => state.scenes.push(scene.clone()),
-    }
-    Ok(scene.id)
-}
-
-pub fn delete_scene(state: &mut AppState, id: &str) {
-    state.scenes.retain(|s| s.id != id);
-    if state.active_scene.as_deref() == Some(id) {
-        state.active_scene = None;
-    }
-}
-
-/// Starts a stored scene on the show. Its effects are looked up now, so edits to them apply.
-pub fn play_scene(state: &mut AppState, id: &str) -> Result<(), String> {
-    let scene = state.scenes.iter().find(|s| s.id == id).ok_or("That scene no longer exists")?;
-    let steps = scene
-        .steps
-        .iter()
-        .map(|s| effect_named(state, &s.effect).map(|effect| Step { effect, secs: s.secs }))
-        .collect::<Result<Vec<_>, _>>()?;
-    let repeat = scene.repeat;
-    set_sequence(state, Sequence { steps, repeat })?;
-    state.active_scene = Some(id.into());
-    state.active_effect = None;
-    Ok(())
+/// Colors of a grid of room spots (`cols` by `rows`, row by row) at time `t`, for previews and icons.
+/// Live sources have no color of their own, so they show black.
+pub fn preview(effect: &Effect, t: f64, cols: usize, rows: usize) -> Vec<[u8; 3]> {
+    let (cols, rows) = (cols.clamp(1, 64), rows.clamp(1, 64));
+    (0..rows)
+        .flat_map(|r| {
+            (0..cols).map(move |c| {
+                let x = (c as f32 + 0.5) / cols as f32;
+                let y = (r as f32 + 0.5) / rows as f32;
+                let (red, green, blue) = effect.color_at(x, y, t).unwrap_or((0, 0, 0));
+                [red, green, blue]
+            })
+        })
+        .collect()
 }
 
 /// Keeps only the IPs that are known lights.
@@ -343,7 +307,6 @@ pub fn save_state(state: &AppState) {
         subnets: state.custom_subnets.clone(),
         api_key: state.api_key.clone(),
         groups: state.groups.clone(),
-        scenes: state.scenes.clone(),
         effects: state.effects.clone(),
     };
     if let Some(dir) = path.parent() {
@@ -690,9 +653,7 @@ pub fn view(state: &AppState) -> StateView {
             })
             .collect(),
         effects: state.effects.clone(),
-        scenes: state.scenes.clone(),
         active_effect: state.active_effect.clone(),
-        active_scene: state.active_scene.clone(),
         status,
         preview,
         positions,
@@ -842,43 +803,43 @@ mod tests {
         AppState { effects: with_builtins(vec![]), ..Default::default() }
     }
 
-    fn step(effect: &str, secs: f32) -> SceneStep {
-        SceneStep { effect: effect.into(), secs }
+    fn step(effect: &str, secs: f32) -> SequenceStep {
+        SequenceStep { effect: effect.into(), secs }
+    }
+
+    fn sequence(name: &str, steps: Vec<SequenceStep>) -> NamedEffect {
+        NamedEffect { id: String::new(), name: name.into(), effect: Effect::Sequence { steps, repeat: true } }
     }
 
     #[test]
-    fn scenes_are_checked_before_saving() {
-        let s = with_effects();
-        let bad_effect = Scene { id: String::new(), name: "x".into(), steps: vec![step("disco", 5.0)], repeat: false };
-        assert!(check_scene(&bad_effect, &s.effects).is_err());
-        let no_steps = Scene { steps: vec![], ..bad_effect.clone() };
-        assert!(check_scene(&no_steps, &s.effects).is_err());
-        let ok = Scene { steps: vec![step("chase", 5.0)], ..bad_effect };
-        assert!(check_scene(&ok, &s.effects).is_ok());
-    }
-
-    #[test]
-    fn scene_names_are_unique_and_saved_once_per_id() {
+    fn sequences_are_checked_against_the_library() {
         let mut s = with_effects();
-        let id = save_scene(&mut s, Scene { id: String::new(), name: " Warm ".into(), steps: vec![step("solid", 5.0)], repeat: false }).unwrap();
-        assert_eq!(s.scenes[0].name, "Warm");
-        assert!(save_scene(&mut s, Scene { id: String::new(), name: "warm".into(), steps: vec![step("solid", 5.0)], repeat: false }).is_err());
-        save_scene(&mut s, Scene { id: id.clone(), name: "Cool".into(), steps: vec![step("rainbow", 5.0)], repeat: false }).unwrap();
-        assert_eq!(s.scenes.len(), 1);
-        assert_eq!(s.scenes[0].name, "Cool");
+        assert!(save_effect(&mut s, sequence("Bad", vec![step("disco", 5.0)])).is_err());
+        assert!(save_effect(&mut s, sequence("Good", vec![step("chase", 5.0)])).is_ok());
     }
 
     #[test]
-    fn playing_a_scene_replaces_the_effect_until_one_is_picked() {
+    fn sequences_cannot_hold_sequences() {
         let mut s = with_effects();
-        let id = save_scene(&mut s, Scene { id: String::new(), name: "Seq".into(), steps: vec![step("chase", 2.0), step("solid", 3.0)], repeat: true }).unwrap();
-        play_scene(&mut s, &id).unwrap();
-        assert_eq!(view(&s).active_scene, Some(id.clone()));
+        let inner = save_effect(&mut s, sequence("Inner", vec![step("chase", 5.0)])).unwrap();
+        assert!(save_effect(&mut s, sequence("Outer", vec![step(&inner, 5.0)])).is_err());
+    }
+
+    #[test]
+    fn playing_a_sequence_resolves_its_steps_when_played() {
+        let mut s = with_effects();
+        let id = save_effect(&mut s, sequence("Seq", vec![step("chase", 2.0), step("solid", 3.0)])).unwrap();
+        play_effect(&mut s, &id).unwrap();
+        assert_eq!(view(&s).active_effect, Some(id.clone()));
+        // An edit to a step's effect shows up the next time the sequence plays.
+        let mut solid = s.effects.iter().find(|e| e.id == "solid").unwrap().clone();
+        solid.effect = Effect::Solid { color: (9, 9, 9) };
+        save_effect(&mut s, solid).unwrap();
+        let played = resolve(&s, &id).unwrap();
+        assert_eq!(played.steps[1].effect, Effect::Solid { color: (9, 9, 9) });
+        assert_eq!(played.steps[1].secs, 3.0);
         play_effect(&mut s, "screen").unwrap();
-        assert!(view(&s).active_scene.is_none());
         assert_eq!(view(&s).active_effect, Some("screen".to_string()));
-        delete_scene(&mut s, &id);
-        assert!(view(&s).scenes.is_empty());
     }
 
     #[test]
@@ -902,6 +863,15 @@ mod tests {
         poll_discovery(&mut s);
         assert!(s.discovery.is_none());
         assert_eq!(view(&s).status, "no lights");
+    }
+
+    #[test]
+    fn preview_is_a_grid_of_room_spots() {
+        let cells = preview(&Effect::Solid { color: (1, 2, 3) }, 0.0, 24, 14);
+        assert_eq!(cells.len(), 24 * 14);
+        assert!(cells.iter().all(|c| *c == [1, 2, 3]));
+        assert_eq!(preview(&Effect::Solid { color: (1, 2, 3) }, 0.0, 8, 4).len(), 32);
+        assert!(preview(&Effect::Screen, 0.0, 8, 4).iter().all(|c| *c == [0, 0, 0]));
     }
 
     #[test]

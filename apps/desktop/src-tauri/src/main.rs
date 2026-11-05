@@ -133,26 +133,10 @@ fn play_effect(app: State<'_, Shared>, id: String) -> Result<(), String> {
     logic::play_effect(&mut s, &id)
 }
 
+/// Previews for several effects in one call, so the UI draws all of them with one round trip per frame.
 #[tauri::command]
-fn save_scene(app: State<'_, Shared>, scene: logic::Scene) -> Result<String, String> {
-    let mut s = lock(&app)?;
-    let id = logic::save_scene(&mut s, scene)?;
-    logic::save_state(&s);
-    Ok(id)
-}
-
-#[tauri::command]
-fn delete_scene(app: State<'_, Shared>, id: String) -> Result<(), String> {
-    let mut s = lock(&app)?;
-    logic::delete_scene(&mut s, &id);
-    logic::save_state(&s);
-    Ok(())
-}
-
-#[tauri::command]
-fn play_scene(app: State<'_, Shared>, id: String) -> Result<(), String> {
-    let mut s = lock(&app)?;
-    logic::play_scene(&mut s, &id)
+fn preview_many(requests: Vec<logic::PreviewRequest>, t: f64) -> Vec<Vec<[u8; 3]>> {
+    requests.iter().map(|r| logic::preview(&r.effect, t, r.cols, r.rows)).collect()
 }
 
 #[tauri::command]
@@ -193,7 +177,6 @@ fn main() {
                 custom_subnets: saved.subnets,
                 api_key: saved.api_key,
                 groups: saved.groups,
-                scenes: saved.scenes,
                 effects: logic::with_builtins(saved.effects),
                 ..Default::default()
             };
@@ -207,9 +190,7 @@ fn main() {
             reset_effect,
             delete_effect,
             play_effect,
-            save_scene,
-            delete_scene,
-            play_scene,
+            preview_many,
             find_lights,
             add_subnet,
             remove_subnet,

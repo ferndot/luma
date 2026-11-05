@@ -55,6 +55,12 @@ mod tests {
     }
 
     #[test]
+    fn a_repeating_single_step_is_not_wrapped() {
+        let seq = Sequence { steps: vec![Step { effect: Effect::Solid { color: (1, 0, 0) }, secs: 1.0 }], repeat: true };
+        assert_eq!(seq.at(5.5).1, 5.5);
+    }
+
+    #[test]
     fn segments_spread_along_a_strip_and_sit_on_a_whole_light() {
         let strip = LightSpec { id: "a".into(), sku: "H6022".into(), ip: "1.1.1.1".into(), razer: true, segments: 3 };
         let spots = segment_spots(&strip, (0.5, 0.2));
@@ -107,6 +113,10 @@ pub struct Sequence {
 impl Sequence {
     /// The step playing at `t` seconds, and how far into that step we are.
     pub fn at(&self, t: f64) -> (&Step, f64) {
+        // One repeating step is a plain effect: its time is not wrapped, so slow patterns sweep the whole room.
+        if self.repeat && self.steps.len() == 1 {
+            return (&self.steps[0], t);
+        }
         let total: f64 = self.steps.iter().map(|s| s.secs as f64).sum();
         let mut left = if self.repeat && total > 0.0 { t % total } else { t };
         for step in &self.steps {

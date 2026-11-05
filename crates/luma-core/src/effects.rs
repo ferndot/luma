@@ -19,20 +19,58 @@ pub enum Effect {
     Band { color: Rgb, background: Rgb, width: f32, period: f32 },
     /// Fades between `from` and `to` and back, once every `period` seconds.
     Pulse { from: Rgb, to: Rgb, period: f32 },
-    /// A direction through the room. The path runs from its first point to its last; the colors and
-    /// brightness of its points travel along that direction across the whole room, `speed` lengths per second.
-    Path { points: Vec<PathPoint>, speed: f32 },
+    /// A route through the room, shaped by `points` (a line from its first point to its last, or a
+    /// ring; see `orbit`). Its `stops` are colors spread evenly along the route and flow along it at
+    /// `speed` lengths per second. Without stops, the points' colors are used in order.
+    Path {
+        points: Vec<PathPoint>,
+        #[serde(default)]
+        stops: Vec<Stop>,
+        speed: f32,
+        #[serde(default)]
+        orbit: Orbit,
+    },
     /// The microphone drives the brightness of a moving rainbow.
     Microphone,
     /// Each spot shows the screen color of its column.
     Screen,
+    /// Library effects played one after another. The app turns these into the show's sequence when
+    /// it plays, so editing a step's effect changes every sequence that uses it.
+    Sequence { steps: Vec<SequenceStep>, repeat: bool },
 }
 
-/// A point on a path: where it is in the room (0 to 1 both ways), its color, and its brightness (0 to 1).
-/// Its place along the path's direction decides when its color and brightness arrive.
+/// One step of a sequence: the id of a library effect and how long it runs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SequenceStep {
+    pub effect: String,
+    pub secs: f32,
+}
+
+const MAX_SEQUENCE_STEPS: usize = 12;
+
+/// How a path runs: a straight line from its first point to its last, or a ring around the room's
+/// center, clockwise or counter-clockwise as seen on screen.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Orbit {
+    #[default]
+    Line,
+    Clockwise,
+    CounterClockwise,
+}
+
+/// A point that shapes a path: where it is in the room (0 to 1 both ways). Its color and brightness
+/// are only used when a path has no stops, as a fallback for older saved paths.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PathPoint {
     pub at: [f32; 2],
+    pub color: Rgb,
+    pub brightness: f32,
+}
+
+/// One color of a path's palette, and how bright it is (0 to 1).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Stop {
     pub color: Rgb,
     pub brightness: f32,
 }
@@ -49,27 +87,28 @@ fn along_direction(points: &[PathPoint], x: f32, y: f32) -> f64 {
     (((x - a[0]) * d[0] + (y - a[1]) * d[1]) / len2) as f64
 }
 
-/// The color and brightness at fraction `u` along the direction. The pattern loops: past the last
-/// point it wraps back to the first.
-fn sample_path(points: &[PathPoint], u: f64) -> (Rgb, f32) {
-    let mut stops: Vec<(f64, &PathPoint)> = points
-        .iter()
-        .map(|p| (along_direction(points, p.at[0], p.at[1]).clamp(0.0, 1.0), p))
-        .collect();
-    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let u = u.rem_euclid(1.0);
-    // The last stop at or before u; if none, the last stop, which wraps round to the first.
-    let n = stops.len();
-    let i = stops.iter().rposition(|s| s.0 <= u).unwrap_or(n - 1);
-    let j = (i + 1) % n;
-    let (fi, fj) = (stops[i].0, stops[j].0);
-    let span = if j > i { fj - fi } else { fj + 1.0 - fi };
-    let uu = if u < fi { u + 1.0 } else { u };
-    let f = if span > 0.0 { ((uu - fi) / span).clamp(0.0, 1.0) } else { 0.0 };
-    let (a, b) = (stops[i].1, stops[j].1);
+/// Where a room position sits along a path, as a fraction. On a line it is the place along the direction;
+/// on a ring it is the angle around the room's center, measured clockwise or counter-clockwise.
+fn position(points: &[PathPoint], orbit: Orbit, x: f32, y: f32) -> f64 {
+    let angle = ((y - 0.5) as f64).atan2((x - 0.5) as f64) / std::f64::consts::TAU;
+    match orbit {
+        Orbit::Line => along_direction(points, x, y),
+        Orbit::Clockwise => angle.rem_euclid(1.0),
+        Orbit::CounterClockwise => 1.0 - angle.rem_euclid(1.0),
+    }
+}
+
+/// The color and brightness at fraction `u` of a path's palette. The palette's colors are spread
+/// evenly around one loop, and blend into each other; past the last one it wraps back to the first.
+fn sample_palette(palette: &[(Rgb, f32)], u: f64) -> (Rgb, f32) {
+    let n = palette.len();
+    let pos = u.rem_euclid(1.0) * n as f64;
+    let i = (pos.floor() as usize) % n;
+    let (a, b) = (palette[i], palette[(i + 1) % n]);
+    let f = pos.fract();
     let mix = |p: u8, q: u8| (p as f64 + (q as f64 - p as f64) * f).round() as u8;
-    let color = (mix(a.color.0, b.color.0), mix(a.color.1, b.color.1), mix(a.color.2, b.color.2));
-    (color, a.brightness + (b.brightness - a.brightness) * f as f32)
+    let color = (mix(a.0.0, b.0.0), mix(a.0.1, b.0.1), mix(a.0.2, b.0.2));
+    (color, a.1 + (b.1 - a.1) * f as f32)
 }
 
 impl Effect {
@@ -99,16 +138,25 @@ impl Effect {
                 let mix = |p: u8, q: u8| (p as f64 + (q as f64 - p as f64) * level).round() as u8;
                 (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
             }
-            Effect::Path { points, speed } => {
+            Effect::Path { points, stops, speed, orbit } => {
                 if points.len() < 2 {
                     return Some(BLACK);
                 }
-                let u = along_direction(points, x, y) - *speed as f64 * t;
-                let (color, brightness) = sample_path(points, u);
+                let palette: Vec<(Rgb, f32)> = if stops.is_empty() {
+                    points.iter().map(|p| (p.color, p.brightness)).collect()
+                } else {
+                    stops.iter().map(|s| (s.color, s.brightness)).collect()
+                };
+                if palette.is_empty() {
+                    return Some(BLACK);
+                }
+                let u = position(points, *orbit, x, y) - *speed as f64 * t;
+                let (color, brightness) = sample_palette(&palette, u);
                 let scale = |c: u8| (c as f32 * brightness.clamp(0.0, 1.0)).round() as u8;
                 (scale(color.0), scale(color.1), scale(color.2))
             }
-            Effect::Microphone | Effect::Screen => return None,
+            // A sequence has no color of its own: the app resolves its steps before it plays.
+            Effect::Microphone | Effect::Screen | Effect::Sequence { .. } => return None,
         })
     }
 
@@ -130,16 +178,31 @@ impl Effect {
                 range("Period", *period, 0.5, 60.0)
             }
             Effect::Pulse { period, .. } => range("Period", *period, 0.5, 60.0),
-            Effect::Path { points, speed } => {
+            Effect::Path { points, stops, speed, .. } => {
                 if points.len() < 2 || points.len() > 16 {
                     return Err("A path needs 2 to 16 points".into());
+                }
+                if stops.len() > 16 {
+                    return Err("A path can have at most 16 colors".into());
                 }
                 for p in points {
                     range("Point x", p.at[0], 0.0, 1.0)?;
                     range("Point y", p.at[1], 0.0, 1.0)?;
                     range("Brightness", p.brightness, 0.0, 1.0)?;
                 }
+                for s in stops {
+                    range("Brightness", s.brightness, 0.0, 1.0)?;
+                }
                 range("Speed", *speed, -4.0, 4.0)
+            }
+            Effect::Sequence { steps, .. } => {
+                if steps.is_empty() || steps.len() > MAX_SEQUENCE_STEPS {
+                    return Err(format!("A sequence needs 1 to {MAX_SEQUENCE_STEPS} steps"));
+                }
+                for step in steps {
+                    range("Step length", step.secs, 1.0, 600.0)?;
+                }
+                Ok(())
             }
             Effect::Solid { .. } | Effect::Microphone | Effect::Screen => Ok(()),
         }
@@ -205,47 +268,97 @@ mod tests {
         PathPoint { at, color, brightness }
     }
 
-    #[test]
-    fn path_colors_run_along_its_direction_across_the_room() {
-        // Red at the start of a left-to-right path, blue at the end.
-        let path = Effect::Path {
-            points: vec![point([0.0, 0.5], (255, 0, 0), 1.0), point([1.0, 0.5], (0, 0, 255), 1.0)],
-            speed: 0.0,
-        };
-        assert_eq!(path.color_at(0.0, 0.5, 0.0), Some((255, 0, 0)));
-        assert_eq!(path.color_at(0.5, 0.5, 0.0), Some((128, 0, 128)));
-        // The direction is the same for the whole room, not just near the path.
-        assert_eq!(path.color_at(0.5, 0.95, 0.0), Some((128, 0, 128)));
+    fn path(points: Vec<PathPoint>, stops: Vec<Stop>, speed: f32, orbit: Orbit) -> Effect {
+        Effect::Path { points, stops, speed, orbit }
+    }
+
+    fn stop(color: Rgb, brightness: f32) -> Stop {
+        Stop { color, brightness }
     }
 
     #[test]
-    fn path_brightness_travels_with_its_color() {
-        let path = Effect::Path {
-            points: vec![point([0.0, 0.5], (255, 255, 255), 1.0), point([1.0, 0.5], (255, 255, 255), 0.0)],
-            speed: 0.0,
-        };
-        assert_eq!(path.color_at(0.0, 0.5, 0.0), Some((255, 255, 255)));
-        assert_eq!(path.color_at(0.5, 0.5, 0.0), Some((128, 128, 128)));
+    fn path_colors_flow_along_its_direction_across_the_room() {
+        // Two colors spread evenly along a left-to-right route: red, then blue, then back to red.
+        let line = path(
+            vec![point([0.0, 0.5], (0, 0, 0), 1.0), point([1.0, 0.5], (0, 0, 0), 1.0)],
+            vec![stop((255, 0, 0), 1.0), stop((0, 0, 255), 1.0)],
+            0.0,
+            Orbit::Line,
+        );
+        assert_eq!(line.color_at(0.0, 0.5, 0.0), Some((255, 0, 0)));
+        assert_eq!(line.color_at(0.25, 0.5, 0.0), Some((128, 0, 128)));
+        // The direction is the same for the whole room, not just near the route.
+        assert_eq!(line.color_at(0.25, 0.95, 0.0), Some((128, 0, 128)));
+    }
+
+    #[test]
+    fn path_brightness_comes_from_its_stops() {
+        let line = path(
+            vec![point([0.0, 0.5], (0, 0, 0), 1.0), point([1.0, 0.5], (0, 0, 0), 1.0)],
+            vec![stop((255, 255, 255), 1.0), stop((255, 255, 255), 0.0)],
+            0.0,
+            Orbit::Line,
+        );
+        assert_eq!(line.color_at(0.0, 0.5, 0.0), Some((255, 255, 255)));
+        assert_eq!(line.color_at(0.25, 0.5, 0.0), Some((128, 128, 128)));
+    }
+
+    #[test]
+    fn route_points_without_stops_fall_back_to_their_colors() {
+        // Older saved paths have no stops: their point colors are the palette.
+        let old = path(
+            vec![point([0.0, 0.5], (255, 0, 0), 1.0), point([1.0, 0.5], (0, 0, 255), 1.0)],
+            vec![],
+            0.0,
+            Orbit::Line,
+        );
+        assert_eq!(old.color_at(0.25, 0.5, 0.0), Some((128, 0, 128)));
     }
 
     #[test]
     fn path_moves_along_its_direction_and_loops() {
-        let path = Effect::Path {
-            points: vec![point([0.0, 0.5], (255, 0, 0), 1.0), point([1.0, 0.5], (0, 0, 255), 1.0)],
-            speed: 0.5,
-        };
-        // At speed 0.5 per second, after one second the spot at the start shows the middle of the path.
-        assert_eq!(path.color_at(0.0, 0.5, 1.0), Some((128, 0, 128)));
+        let line = path(
+            vec![point([0.0, 0.5], (0, 0, 0), 1.0), point([1.0, 0.5], (0, 0, 0), 1.0)],
+            vec![stop((255, 0, 0), 1.0), stop((0, 0, 255), 1.0)],
+            0.5,
+            Orbit::Line,
+        );
+        // At speed 0.5 per second, after one second the start shows the second color.
+        assert_eq!(line.color_at(0.0, 0.5, 1.0), Some((0, 0, 255)));
     }
 
     #[test]
-    fn path_checks_its_points() {
-        let ok = Effect::Path { points: vec![point([0.0, 0.0], (1, 1, 1), 1.0), point([1.0, 1.0], (1, 1, 1), 1.0)], speed: 0.0 };
-        assert!(ok.check().is_ok());
-        let one = Effect::Path { points: vec![point([0.0, 0.0], (1, 1, 1), 1.0)], speed: 0.0 };
+    fn ring_path_runs_around_the_room_clockwise_or_counter() {
+        // On screen, clockwise runs right, bottom, left, top. Counter-clockwise is the reverse.
+        let route = vec![point([1.0, 0.5], (0, 0, 0), 1.0), point([0.5, 1.0], (0, 0, 0), 1.0)];
+        assert!((position(&route, Orbit::Clockwise, 0.5, 1.0) - 0.25).abs() < 1e-9);
+        assert!((position(&route, Orbit::Clockwise, 0.5, 0.0) - 0.75).abs() < 1e-9);
+        assert!((position(&route, Orbit::CounterClockwise, 0.5, 1.0) - 0.75).abs() < 1e-9);
+        // On a two-color ring, a quarter of the way round is halfway between the colors.
+        let stops = vec![stop((255, 0, 0), 1.0), stop((0, 0, 255), 1.0)];
+        let cw = path(route, stops, 0.0, Orbit::Clockwise);
+        assert_eq!(cw.color_at(0.5, 1.0, 0.0), Some((128, 0, 128)));
+        assert_eq!(cw.color_at(1.0, 0.5, 0.0), Some((255, 0, 0)));
+    }
+
+    #[test]
+    fn path_checks_its_points_and_stops() {
+        let route = || vec![point([0.0, 0.0], (1, 1, 1), 1.0), point([1.0, 1.0], (1, 1, 1), 1.0)];
+        assert!(path(route(), vec![stop((1, 1, 1), 1.0)], 0.0, Orbit::Line).check().is_ok());
+        let one = path(vec![point([0.0, 0.0], (1, 1, 1), 1.0)], vec![], 0.0, Orbit::Line);
         assert!(one.check().is_err());
-        let bright = Effect::Path { points: vec![point([0.0, 0.0], (1, 1, 1), 2.0), point([1.0, 1.0], (1, 1, 1), 1.0)], speed: 0.0 };
-        assert!(bright.check().is_err());
+        assert!(path(route(), vec![stop((1, 1, 1), 2.0)], 0.0, Orbit::Line).check().is_err());
+    }
+
+    #[test]
+    fn sequences_are_checked_for_steps_and_length() {
+        let step = |secs| SequenceStep { effect: "solid".into(), secs };
+        let seq = |steps| Effect::Sequence { steps, repeat: true };
+        assert!(seq(vec![step(5.0)]).check().is_ok());
+        assert!(seq(vec![]).check().is_err());
+        assert!(seq(vec![step(0.5)]).check().is_err());
+        assert!(seq(vec![step(5.0); 13]).check().is_err());
+        assert_eq!(seq(vec![step(5.0)]).color_at(0.0, 0.0, 0.0), None);
     }
 
     #[test]

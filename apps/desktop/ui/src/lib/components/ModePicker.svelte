@@ -1,65 +1,52 @@
 <script lang="ts">
-  import { swatch, type NamedEffect, type Scene } from '../api'
+  import { iconEffect, swatch, type NamedEffect } from '../api'
+  import EffectIcon from './EffectIcon.svelte'
+  import PlayIcon from './PlayIcon.svelte'
+  import Spinner from './Spinner.svelte'
 
   let {
     effects,
-    scenes,
     activeEffect,
-    activeScene,
-    onplayeffect,
-    onplayscene,
+    running,
+    starting,
+    onplay,
+    onstop,
   }: {
     effects: NamedEffect[]
-    scenes: Scene[]
     activeEffect: string | null
-    activeScene: string | null
-    onplayeffect: (id: string) => void
-    onplayscene: (id: string) => void
+    running: boolean
+    starting: boolean
+    onplay: (id: string) => void
+    onstop: () => void
   } = $props()
 
   let query = $state('')
   let needle = $derived(query.trim().toLowerCase())
-  let shownEffects = $derived(effects.filter((e) => e.name.toLowerCase().includes(needle)))
-  let shownScenes = $derived(scenes.filter((s) => s.name.toLowerCase().includes(needle)))
+  let shown = $derived(effects.filter((e) => e.name.toLowerCase().includes(needle)))
 </script>
 
-<aside class="picker" aria-label="Scenes">
+<aside class="picker" aria-label="Effects">
   <h2 class="title">Effects</h2>
-  <input type="search" placeholder="Search effects and scenes" aria-label="Search effects and scenes" bind:value={query} />
+  <input type="search" placeholder="Search effects" aria-label="Search effects" bind:value={query} />
   <div class="list" role="group" aria-label="Effects">
-    {#each shownEffects as e (e.id)}
-      <button
-        class="mode"
-        class:active={!activeScene && activeEffect === e.id}
-        style="--c: {swatch(e.effect)}"
-        aria-pressed={!activeScene && activeEffect === e.id}
-        onclick={() => onplayeffect(e.id)}
-      >
-        <span class="dot" aria-hidden="true"></span>
-        {e.name}
-      </button>
+    {#each shown as e (e.id)}
+      {@const current = activeEffect === e.id}
+      <div class="mode" class:active={current} style="--c: {swatch(e.effect)}">
+        <button class="pick" onclick={() => onplay(e.id)} aria-pressed={current}>
+          <EffectIcon spec={iconEffect(e.effect, effects)} width={56} height={34} />
+          <span class="name">{e.name}</span>
+        </button>
+        {#if current && starting}
+          <span class="control"><Spinner size={14} label="Starting {e.name}" /></span>
+        {:else if current && running}
+          <button class="control" onclick={onstop} aria-label="Stop {e.name}"><PlayIcon kind="stop" size={14} /></button>
+        {:else}
+          <button class="control" onclick={() => onplay(e.id)} aria-label="Play {e.name}"><PlayIcon kind="play" size={14} /></button>
+        {/if}
+      </div>
     {/each}
   </div>
-
-  {#if shownScenes.length > 0}
-    <h2 class="title">Scenes</h2>
-    <div class="list" role="group" aria-label="Scenes">
-      {#each shownScenes as s (s.id)}
-        <button
-          class="mode"
-          class:active={activeScene === s.id}
-          style="--c: #e879f9"
-          aria-pressed={activeScene === s.id}
-          onclick={() => onplayscene(s.id)}
-        >
-          <span class="dot" aria-hidden="true"></span>
-          {s.name}
-        </button>
-      {/each}
-    </div>
-  {/if}
-
-  {#if shownEffects.length === 0 && shownScenes.length === 0}
+  {#if shown.length === 0}
     <p class="none">Nothing matches “{query}”.</p>
   {/if}
 </aside>
@@ -97,35 +84,52 @@
   .mode {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
+    gap: 6px;
+    padding: 4px 6px 4px 4px;
     border: 1px solid transparent;
     border-radius: 8px;
-    background: transparent;
     color: var(--text);
-    font: inherit;
-    font-size: 14px;
-    font-weight: 500;
-    text-align: left;
   }
   .mode:hover { background: var(--raised); }
   .mode.active {
     border-color: var(--c);
     background: color-mix(in srgb, var(--c) 18%, var(--surface));
-    font-weight: 600;
   }
-  .dot {
-    width: 10px;
-    height: 10px;
+  .pick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+  }
+  .mode.active .pick { font-weight: 600; }
+  .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .control {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
     flex: none;
+    border: 1px solid var(--line);
     border-radius: 50%;
-    background: var(--c);
-    opacity: 0.55;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
   }
-  .mode.active .dot {
-    opacity: 1;
-    box-shadow: 0 0 8px var(--c);
-  }
+  span.control { cursor: default; border-color: transparent; background: transparent; }
   .none {
     margin: 4px 2px;
     color: var(--muted);

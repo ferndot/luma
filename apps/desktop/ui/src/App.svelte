@@ -7,11 +7,8 @@
     saveEffect,
     resetEffect,
     deleteEffect,
-    saveScene,
-    deleteScene,
-    playScene,
-    type Scene,
     type NamedEffect,
+    iconEffect,
     findLights,
     addSubnet,
     removeSubnet,
@@ -31,7 +28,9 @@
   import Titlebar from './lib/components/Titlebar.svelte'
   import GroupDetail from './lib/components/GroupDetail.svelte'
   import Settings from './lib/components/Settings.svelte'
-  import Builder from './lib/components/Builder.svelte'
+  import EffectBuilder from './lib/components/EffectBuilder.svelte'
+  import Toasts from './lib/components/Toasts.svelte'
+  import { toast } from './lib/toast.svelte'
 
   // Look for lights again this often while no scene is running.
   const RESCAN_MS = 60_000
@@ -39,6 +38,52 @@
   let st = $state<AppState | null>(null)
   let error = $state('')
   let page = $state<Page>({ kind: 'home' })
+
+  // The effect the user just picked. It shows in the scene at once, before the lights have started.
+  let selected = $state<string | null>(null)
+  // The effect shown as playing: the picked one, else the one the show is running.
+  let shownId = $derived(selected ?? (st?.running ? (st?.active_effect ?? null) : null))
+  // Picked, but the lights are not yet running and drawing.
+  let starting = $derived(selected !== null && (!st?.running || st.preview.length === 0))
+  let stageEffect = $derived.by(() => {
+    const found = st?.effects.find((e) => e.id === shownId)
+    return found ? iconEffect(found.effect, st?.effects ?? []) : null
+  })
+  // Once the lights have run for the pick, the show itself says what plays, so the pick is dropped.
+  // If they never start, the pick is dropped when the show stops.
+  let started = false
+  $effect(() => {
+    if (selected === null) {
+      started = false
+      return
+    }
+    if (st?.running) started = true
+    if (st?.running && st.preview.length > 0) selected = null
+    else if (started && st && !st.running) selected = null
+  })
+
+  // Play an effect on the open group's lights: show it at once, set it on the show, then start the show.
+  async function playPicked(id: string) {
+    if (!openGroup) {
+      error = 'Open a group to play an effect on its lights.'
+      return
+    }
+    selected = id
+    const ok = await run(() => playEffect(id))
+    if (!ok) {
+      selected = null
+      return
+    }
+    if (!st?.running) {
+      const began = await run(() => startGroup(openGroup.id))
+      if (!began) selected = null
+    }
+  }
+
+  async function stopPicked() {
+    selected = null
+    await run(() => stop())
+  }
 
   // The open group, or back to the list if it was deleted.
   let openGroup = $derived(
@@ -104,25 +149,28 @@
     return ok
   }
 
-  // Saves a scene from the builder; returns its id, or null if it was refused (the error shows at the top).
+  // Saves an effect from the builder; returns its id, or null if it was refused (the error shows at the top).
   async function saveEffectDraft(effect: NamedEffect): Promise<string | null> {
     let id: string | null = null
     const ok = await run(async () => {
       id = await saveEffect(effect)
     })
+    if (ok) toast(`Saved “${effect.name.trim()}”`)
     return ok ? id : null
   }
 
-  async function saveSceneDraft(scene: Scene): Promise<string | null> {
-    let id: string | null = null
-    const ok = await run(async () => {
-      id = await saveScene(scene)
-    })
-    return ok ? id : null
+  async function resetDraft(id: string) {
+    if (await run(() => resetEffect(id))) toast('Reset to how it started')
+  }
+
+  async function deleteDraft(id: string) {
+    if (await run(() => deleteEffect(id))) toast('Effect deleted')
   }
 
   async function saveKey(key: string): Promise<boolean> {
-    return run(() => setApiKey(key))
+    const ok = await run(() => setApiKey(key))
+    if (ok) toast(key.trim() ? 'API key saved' : 'API key cleared')
+    return ok
   }
 
   async function addNetwork(value: string): Promise<boolean> {
@@ -132,8 +180,9 @@
   }
 </script>
 
-<div class="app" class:with-scenes={openGroup !== null}>
+<div class="app" class:with-picker={openGroup !== null}>
   <Titlebar />
+  <Toasts />
 
   <Sidebar
     groups={st?.groups ?? []}
@@ -149,19 +198,17 @@
       <p class="error" role="alert">{error}</p>
     {/if}
 
-    {#if page.kind === 'scenes'}
-      <Builder
+    {#if page.kind === 'effects'}
+      <EffectBuilder
         effects={st?.effects ?? []}
-        scenes={st?.scenes ?? []}
-        activeEffect={st?.active_effect ?? null}
-        activeScene={st?.active_scene ?? null}
-        onsaveeffect={saveEffectDraft}
-        onreseteffect={(id) => run(() => resetEffect(id))}
-        ondeleteeffect={(id) => run(() => deleteEffect(id))}
-        onplayeffect={(id) => run(() => playEffect(id))}
-        onsavescene={saveSceneDraft}
-        ondeletescene={(id) => run(() => deleteScene(id))}
-        onplayscene={(id) => run(() => playScene(id))}
+        activeEffect={shownId}
+        running={st?.running ?? false}
+        {starting}
+        onsave={saveEffectDraft}
+        onreset={resetDraft}
+        ondelete={deleteDraft}
+        onplay={playPicked}
+        onstop={stopPicked}
       />
     {:else if page.kind === 'settings'}
       <Settings
@@ -179,13 +226,13 @@
         preview={st?.preview ?? []}
         positions={st?.positions ?? []}
         running={st?.running ?? false}
+        stage={stageEffect}
+        {starting}
         onrename={(name) => run(() => renameGroup(openGroup.id, name))}
         onmembers={(members) => run(() => setGroupMembers(openGroup.id, members))}
         onposition={(device, x, y) => run(() => setGroupPosition(openGroup.id, device, x, y))}
         onlight={(device, color) => run(() => lightDevice(openGroup.id, device, color))}
         onrelease={(device) => run(() => releaseDevice(device))}
-        onstart={() => run(() => startGroup(openGroup.id))}
-        onstop={() => run(() => stop())}
         ondelete={() => {
           run(() => deleteGroup(openGroup.id))
           page = { kind: 'home' }
@@ -201,11 +248,11 @@
   {#if openGroup}
     <ModePicker
       effects={st?.effects ?? []}
-      scenes={st?.scenes ?? []}
-      activeEffect={st?.active_effect ?? null}
-      activeScene={st?.active_scene ?? null}
-      onplayeffect={(id) => run(() => playEffect(id))}
-      onplayscene={(id) => run(() => playScene(id))}
+      activeEffect={shownId}
+      running={st?.running ?? false}
+      {starting}
+      onplay={playPicked}
+      onstop={stopPicked}
     />
   {/if}
 </div>
@@ -225,8 +272,8 @@
     min-height: 0;
     background: var(--bg);
   }
-  /* Group pages get a scenes sidebar on the right. */
-  .app.with-scenes {
+  /* Group pages get an effects sidebar on the right. */
+  .app.with-picker {
     grid-template-columns: 200px minmax(0, 1fr) 220px;
   }
   .app :global(.picker) {
@@ -251,7 +298,7 @@
   /* Narrow windows: the sidebar becomes a strip above the page. */
   @media (max-width: 640px) {
     .app,
-    .app.with-scenes {
+    .app.with-picker {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto minmax(0, 1fr);
     }

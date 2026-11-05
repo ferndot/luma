@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Group, Light, Rgb } from '../api'
+  import type { Effect, Group, Light, Rgb } from '../api'
   import ShowStage from './ShowStage.svelte'
   import Arranger from './Arranger.svelte'
   import Button from './Button.svelte'
@@ -10,13 +10,13 @@
     preview,
     positions,
     running,
+    stage,
+    starting,
     onrename,
     onmembers,
     onposition,
     onlight,
     onrelease,
-    onstart,
-    onstop,
     ondelete,
   }: {
     group: Group
@@ -24,13 +24,14 @@
     preview: Rgb[]
     positions: [number, number][]
     running: boolean
+    // Named `stage`, not `effect`: a prop called effect would shadow the $effect rune.
+    stage: Effect | null
+    starting: boolean
     onrename: (name: string) => Promise<boolean>
     onmembers: (members: string[]) => void
     onposition: (device: string, x: number, y: number) => void
     onlight: (device: string, color: [number, number, number]) => void
     onrelease: (device: string) => void
-    onstart: () => void
-    onstop: () => void
     ondelete: () => void
   } = $props()
 
@@ -65,19 +66,6 @@
 <section class="page">
   <header class="head">
     <h1>{group.name}</h1>
-    <div class="start">
-      {#if !running && members.length === 0}
-        <span class="muted">Add devices first.</span>
-      {/if}
-      <Button
-        size="lg"
-        variant={running ? 'danger' : 'success'}
-        onclick={() => (running ? onstop() : onstart())}
-        disabled={!running && members.length === 0}
-      >
-        {running ? 'Stop scene' : 'Start scene'}
-      </Button>
-    </div>
   </header>
 
   <div class="tabs" role="tablist">
@@ -98,7 +86,7 @@
 
   <div id="panel" role="tabpanel" aria-labelledby="tab-{tab}" class="panel">
     {#if tab === 'scene'}
-      <ShowStage {preview} {positions} {running} />
+      <ShowStage {preview} {positions} {running} shown={stage} {starting} />
     {:else if tab === 'layout'}
       <p class="muted hint">Press a device to light it. Drag to match where it is in the room. Scenes run left to right.</p>
       {#if members.length === 0}
@@ -187,11 +175,6 @@
   h1 {
     margin: 0;
     font-size: 20px;
-  }
-  .start {
-    display: flex;
-    align-items: center;
-    gap: 12px;
   }
 
   .tabs {
