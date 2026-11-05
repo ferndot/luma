@@ -1,0 +1,31 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --bg-a: #1a0b2e;
+  --bg-b: #3b1670;
+  --bg-c: #1f0f3d;
+  --bg-d: #4b1d6e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: #f5efff;
+  background: linear-gradient(120deg, var(--bg-a), var(--bg-b), var(--bg-c), var(--bg-d));
+  background-size: 300% 300%;
+  animation: drift 20s ease infinite;
+}
+
+@keyframes drift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body { animation: none; }
+}
