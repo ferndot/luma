@@ -6,9 +6,9 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 luma-engine = { path = "../../../crates/luma-engine" }
 serde = { version = "1", features = ["derive"] }
-tauri = "2"
+tauri = { version = "2", features = [] }

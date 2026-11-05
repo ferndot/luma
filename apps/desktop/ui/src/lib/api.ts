@@ -1,4 +1,14 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke as tauriInvoke } from '@tauri-apps/api/core'
+
+// Outside the desktop window (for example a plain browser tab), there is no backend to call.
+const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!inTauri) {
+    return Promise.reject(new Error('Open Luma as the desktop app (run `pnpm tauri dev`), not in a browser tab.'))
+  }
+  return tauriInvoke<T>(cmd, args)
+}
 
 export type Rgb = [number, number, number]
 
