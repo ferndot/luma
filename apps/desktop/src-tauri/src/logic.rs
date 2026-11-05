@@ -1,12 +1,16 @@
 //! Tauri-free state and command logic, so it can be unit-tested without a window.
 use luma_engine::{LightSpec, Mode, Show};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 pub type Discovery = Receiver<Result<Vec<LightSpec>, String>>;
+pub type NameFetch = Receiver<Result<BTreeMap<String, String>, String>>;
+
+const DEVICES_URL: &str = "https://openapi.api.govee.com/router/api/v1/user/devices";
 
 #[derive(Default)]
 pub struct AppState {
@@ -24,6 +28,15 @@ pub struct AppState {
     pub remembered: Vec<String>,
     /// Subnets the user added by hand (e.g. an IoT network the PC can route to), as "a.b.c".
     pub custom_subnets: Vec<String>,
+    /// Names the user gave lights, keyed by device id.
+    pub names: BTreeMap<String, String>,
+    /// Names from the Govee cloud account, keyed by device id.
+    pub cloud_names: BTreeMap<String, String>,
+    /// Govee cloud API key, used only to read device names.
+    pub api_key: Option<String>,
+    pub names_fetch: Option<NameFetch>,
+    /// Result of the last name fetch, shown in the settings.
+    pub key_status: String,
     /// Where the saved settings are kept, when the app has a data folder.
     pub store_path: Option<PathBuf>,
 }
@@ -34,10 +47,14 @@ pub struct AppState {
 pub struct Saved {
     pub lights: Vec<String>,
     pub subnets: Vec<String>,
+    pub names: BTreeMap<String, String>,
+    pub api_key: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct LightView {
+    pub id: String,
+    pub name: String,
     pub ip: String,
     pub sku: String,
     pub razer: bool,
@@ -51,6 +68,8 @@ pub struct StateView {
     pub scanning: bool,
     pub subnet: String,
     pub subnets: Vec<String>,
+    pub has_key: bool,
+    pub key_status: String,
     pub mode: String,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
@@ -125,6 +144,8 @@ pub fn save_state(state: &AppState) {
     let saved = Saved {
         lights: state.known.iter().map(|l| l.ip.clone()).collect(),
         subnets: state.custom_subnets.clone(),
+        names: state.names.clone(),
+        api_key: state.api_key.clone(),
     };
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -162,6 +183,89 @@ pub fn add_subnet(state: &mut AppState, input: &str) -> Result<(), String> {
 
 pub fn remove_subnet(state: &mut AppState, prefix: &str) {
     state.custom_subnets.retain(|p| p != prefix);
+}
+
+/// Sets the name shown for a light. An empty name goes back to the default.
+pub fn rename_light(state: &mut AppState, id: &str, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.chars().count() > 40 {
+        return Err("Names can be at most 40 characters".into());
+    }
+    if name.is_empty() {
+        state.names.remove(id);
+    } else {
+        state.names.insert(id.to_string(), name.to_string());
+    }
+    Ok(())
+}
+
+/// The name shown for a light when the user has not set one: its model and last IP number.
+pub fn default_name(spec: &LightSpec) -> String {
+    let last = spec.ip.rsplit('.').next().unwrap_or(&spec.ip);
+    format!("{} · .{last}", spec.sku)
+}
+
+/// Stores the Govee API key (empty clears it) and fetches device names with it.
+pub fn set_api_key(state: &mut AppState, key: &str) {
+    let key = key.trim();
+    state.api_key = (!key.is_empty()).then(|| key.to_string());
+    state.cloud_names.clear();
+    state.key_status.clear();
+    begin_name_fetch(state);
+}
+
+/// Fetches device names from the Govee cloud in the background, if a key is set.
+pub fn begin_name_fetch(state: &mut AppState) {
+    let Some(key) = state.api_key.clone() else { return };
+    if state.names_fetch.is_some() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(fetch_cloud_names(&key));
+    });
+    state.names_fetch = Some(rx);
+    state.key_status = "Loading names from Govee…".into();
+}
+
+/// Picks up a finished name fetch. Returns true when names arrived.
+pub fn poll_names(state: &mut AppState) -> bool {
+    let Some(rx) = &state.names_fetch else { return false };
+    let result = match rx.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Empty) => return false,
+        Err(TryRecvError::Disconnected) => Err("Name fetch stopped unexpectedly".to_string()),
+    };
+    state.names_fetch = None;
+    match result {
+        Ok(names) => {
+            state.key_status = format!("Named {} device(s) from Govee", names.len());
+            state.cloud_names = names;
+            true
+        }
+        Err(e) => {
+            state.key_status = e;
+            false
+        }
+    }
+}
+
+fn fetch_cloud_names(key: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut resp = ureq::get(DEVICES_URL)
+        .header("Govee-API-Key", key)
+        .call()
+        .map_err(|e| format!("Could not reach Govee: {e}"))?;
+    let body: Value = resp.body_mut().read_json().map_err(|e| format!("Unexpected reply from Govee: {e}"))?;
+    parse_device_names(&body)
+}
+
+/// Reads `deviceName` for each device in a Govee cloud device-list reply.
+pub fn parse_device_names(body: &Value) -> Result<BTreeMap<String, String>, String> {
+    let list = body["data"].as_array().ok_or_else(|| "Govee rejected the key or returned no devices".to_string())?;
+    Ok(list
+        .iter()
+        .filter_map(|d| Some((d["device"].as_str()?.to_string(), d["deviceName"].as_str()?.to_string())))
+        .collect())
 }
 
 /// Detects the local subnets and scans them for lights, unless a scan is already running.
@@ -212,6 +316,13 @@ pub fn view(state: &AppState) -> StateView {
         .known
         .iter()
         .map(|l| LightView {
+            id: l.id.clone(),
+            name: state
+                .names
+                .get(&l.id)
+                .or_else(|| state.cloud_names.get(&l.id))
+                .cloned()
+                .unwrap_or_else(|| default_name(l)),
             ip: l.ip.clone(),
             sku: l.sku.clone(),
             razer: l.razer,
@@ -224,6 +335,8 @@ pub fn view(state: &AppState) -> StateView {
         scanning: state.discovery.is_some(),
         subnet: state.subnet.clone(),
         subnets: state.custom_subnets.clone(),
+        has_key: state.api_key.is_some(),
+        key_status: state.key_status.clone(),
         mode,
         status,
         preview,
@@ -237,7 +350,8 @@ mod tests {
 
     fn spec(ip: &str, sku: &str) -> LightSpec {
         let razer = sku == "H6022";
-        LightSpec { sku: sku.into(), ip: ip.into(), razer, segments: if razer { 15 } else { 1 } }
+        let id = format!("id-{ip}");
+        LightSpec { id, sku: sku.into(), ip: ip.into(), razer, segments: if razer { 15 } else { 1 } }
     }
 
     fn with_lights() -> AppState {
@@ -302,8 +416,50 @@ mod tests {
         let v = view(&s);
         assert!(!v.running);
         assert_eq!(v.mode, "rainbow");
-        assert_eq!(v.lights[0], LightView { ip: "10.0.0.1".into(), sku: "H6022".into(), razer: true, segments: 15, selected: false });
+        assert_eq!(
+            v.lights[0],
+            LightView {
+                id: "id-10.0.0.1".into(),
+                name: "H6022 · .1".into(),
+                ip: "10.0.0.1".into(),
+                sku: "H6022".into(),
+                razer: true,
+                segments: 15,
+                selected: false,
+            }
+        );
         assert!(v.lights[1].selected);
+    }
+
+    #[test]
+    fn cloud_names_fill_in_unless_renamed() {
+        let mut s = with_lights();
+        s.cloud_names.insert("id-10.0.0.1".into(), "Desk strip".into());
+        assert_eq!(view(&s).lights[0].name, "Desk strip");
+        rename_light(&mut s, "id-10.0.0.1", "Shelf").unwrap();
+        assert_eq!(view(&s).lights[0].name, "Shelf");
+    }
+
+    #[test]
+    fn device_names_are_read_from_cloud_reply() {
+        let body = serde_json::json!({"data": [
+            {"device": "AA:01", "deviceName": "Desk strip"},
+            {"device": "AA:02"}
+        ]});
+        let names = parse_device_names(&body).unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names["AA:01"], "Desk strip");
+        assert!(parse_device_names(&serde_json::json!({"message": "bad key"})).is_err());
+    }
+
+    #[test]
+    fn renamed_lights_keep_their_name_and_empty_resets() {
+        let mut s = with_lights();
+        rename_light(&mut s, "id-10.0.0.2", "  Desk strip  ").unwrap();
+        assert_eq!(view(&s).lights[1].name, "Desk strip");
+        rename_light(&mut s, "id-10.0.0.2", "   ").unwrap();
+        assert_eq!(view(&s).lights[1].name, "H6000 · .2");
+        assert!(rename_light(&mut s, "id-10.0.0.2", &"x".repeat(41)).is_err());
     }
 
     #[test]

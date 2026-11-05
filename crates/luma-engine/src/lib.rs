@@ -14,6 +14,8 @@ pub enum Mode {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LightSpec {
+    /// The device id from the LAN scan; stable across IP changes.
+    pub id: String,
     pub sku: String,
     pub ip: String,
     pub razer: bool,
@@ -41,11 +43,17 @@ impl Mode {
 /// Light specs from discovery JSON values (entries missing "ip" or "sku" are skipped).
 pub fn specs_from_discovery(found: &BTreeMap<String, Value>) -> Vec<LightSpec> {
     found
-        .values()
-        .filter_map(|v| {
+        .iter()
+        .filter_map(|(id, v)| {
             let (ip, sku) = (v.get("ip")?.as_str()?, v.get("sku")?.as_str()?);
             let cap = luma_govee::capability(sku);
-            Some(LightSpec { sku: sku.into(), ip: ip.into(), razer: cap.razer, segments: cap.segments })
+            Some(LightSpec {
+                id: id.clone(),
+                sku: sku.into(),
+                ip: ip.into(),
+                razer: cap.razer,
+                segments: cap.segments,
+            })
         })
         .collect()
 }
@@ -111,6 +119,7 @@ mod tests {
         m.insert("c".into(), json!({"sku": "H6000"}));
         let s = specs_from_discovery(&m);
         assert_eq!(s.len(), 2);
+        assert_eq!(s[0].id, "a");
         assert!(s[0].razer && s[0].segments == 15);
         assert!(!s[1].razer && s[1].segments == 1);
     }

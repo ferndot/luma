@@ -16,7 +16,16 @@ fn get_state(app: State<'_, Shared>) -> Result<StateView, String> {
     if logic::poll_discovery(&mut s) {
         logic::save_state(&s);
     }
+    logic::poll_names(&mut s);
     Ok(logic::view(&s))
+}
+
+#[tauri::command]
+fn set_api_key(app: State<'_, Shared>, key: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::set_api_key(&mut s, &key);
+    logic::save_state(&s);
+    Ok(())
 }
 
 #[tauri::command]
@@ -31,6 +40,14 @@ fn add_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
 fn remove_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
     let mut s = lock(&app)?;
     logic::remove_subnet(&mut s, &subnet);
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_light(app: State<'_, Shared>, id: String, name: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::rename_light(&mut s, &id, &name)?;
     logic::save_state(&s);
     Ok(())
 }
@@ -73,16 +90,29 @@ fn main() {
             // Lights and added subnets from earlier runs are kept in the app's data folder.
             let store_path = app.path().app_data_dir().ok().map(|dir| dir.join("settings.json"));
             let saved = store_path.as_deref().map(logic::load_saved).unwrap_or_default();
-            app.manage(Mutex::new(AppState {
+            let mut state = AppState {
                 store_path,
                 remembered: saved.lights,
                 custom_subnets: saved.subnets,
+                names: saved.names,
+                api_key: saved.api_key,
                 ..Default::default()
-            }));
+            };
+            logic::begin_name_fetch(&mut state);
+            app.manage(Mutex::new(state));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_state, set_mode, find_lights, add_subnet, remove_subnet, set_selected, start, stop
+            get_state,
+            set_mode,
+            find_lights,
+            add_subnet,
+            remove_subnet,
+            rename_light,
+            set_api_key,
+            set_selected,
+            start,
+            stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running Luma");

@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "Luma",
-        "width": 980,
-        "height": 760,
-        "minWidth": 340,
-        "minHeight": 560
+        "width": 1120,
+        "height": 720,
+        "minWidth": 520,
+        "minHeight": 440,
+        "center": true
       }
     ],
     "security": {
