@@ -2471,11 +2471,15 @@ dependencies = [
 [[package]]
 name = "luma-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "luma-desktop"
 version = "0.1.0"
 dependencies = [
+ "luma-core",
  "luma-engine",
  "serde",
  "serde_json",

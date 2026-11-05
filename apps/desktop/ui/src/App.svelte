@@ -1,7 +1,17 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
+  import ModePicker from './lib/components/ModePicker.svelte'
   import {
     getState,
-    setMode,
+    playEffect,
+    saveEffect,
+    resetEffect,
+    deleteEffect,
+    saveScene,
+    deleteScene,
+    playScene,
+    type Scene,
+    type NamedEffect,
     findLights,
     addSubnet,
     removeSubnet,
@@ -21,6 +31,7 @@
   import Titlebar from './lib/components/Titlebar.svelte'
   import GroupDetail from './lib/components/GroupDetail.svelte'
   import Settings from './lib/components/Settings.svelte'
+  import Builder from './lib/components/Builder.svelte'
 
   // Look for lights again this often while no scene is running.
   const RESCAN_MS = 60_000
@@ -37,9 +48,11 @@
     if (page.kind === 'group' && st && !openGroup) page = { kind: 'home' }
   })
 
-  // Poll the backend about 5 times a second while the page is open.
+  // Poll the backend while the page is open: 5 times a second during a scene (the preview moves),
+  // once a second otherwise. The next poll waits for this one, so slow calls never pile up.
   $effect(() => {
     let alive = true
+    let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
       try {
         const next = await getState()
@@ -50,21 +63,22 @@
       } catch (e) {
         if (alive) error = String(e)
       }
+      if (alive) timer = setTimeout(poll, st?.running ? 200 : 1000)
     }
     poll()
-    const id = setInterval(poll, 200)
     return () => {
       alive = false
-      clearInterval(id)
+      clearTimeout(timer)
     }
   })
 
   // Find lights on launch, then quietly again while idle, so new or rebooted lights show up.
+  // Read `st` only inside the timer callback: reading it in the effect would re-run it on every poll.
   $effect(() => {
     const scan = () => {
       if (!st?.running) run(() => findLights())
     }
-    scan()
+    untrack(scan)
     const id = setInterval(scan, RESCAN_MS)
     return () => clearInterval(id)
   })
@@ -90,6 +104,23 @@
     return ok
   }
 
+  // Saves a scene from the builder; returns its id, or null if it was refused (the error shows at the top).
+  async function saveEffectDraft(effect: NamedEffect): Promise<string | null> {
+    let id: string | null = null
+    const ok = await run(async () => {
+      id = await saveEffect(effect)
+    })
+    return ok ? id : null
+  }
+
+  async function saveSceneDraft(scene: Scene): Promise<string | null> {
+    let id: string | null = null
+    const ok = await run(async () => {
+      id = await saveScene(scene)
+    })
+    return ok ? id : null
+  }
+
   async function saveKey(key: string): Promise<boolean> {
     return run(() => setApiKey(key))
   }
@@ -101,7 +132,7 @@
   }
 </script>
 
-<div class="app">
+<div class="app" class:with-scenes={openGroup !== null}>
   <Titlebar />
 
   <Sidebar
@@ -118,7 +149,21 @@
       <p class="error" role="alert">{error}</p>
     {/if}
 
-    {#if page.kind === 'settings'}
+    {#if page.kind === 'scenes'}
+      <Builder
+        effects={st?.effects ?? []}
+        scenes={st?.scenes ?? []}
+        activeEffect={st?.active_effect ?? null}
+        activeScene={st?.active_scene ?? null}
+        onsaveeffect={saveEffectDraft}
+        onreseteffect={(id) => run(() => resetEffect(id))}
+        ondeleteeffect={(id) => run(() => deleteEffect(id))}
+        onplayeffect={(id) => run(() => playEffect(id))}
+        onsavescene={saveSceneDraft}
+        ondeletescene={(id) => run(() => deleteScene(id))}
+        onplayscene={(id) => run(() => playScene(id))}
+      />
+    {:else if page.kind === 'settings'}
       <Settings
         hasKey={st?.has_key ?? false}
         keyStatus={st?.key_status ?? ''}
@@ -131,7 +176,6 @@
       <GroupDetail
         group={openGroup}
         lights={st?.lights ?? []}
-        mode={st?.mode ?? ''}
         preview={st?.preview ?? []}
         positions={st?.positions ?? []}
         running={st?.running ?? false}
@@ -142,7 +186,6 @@
         onrelease={(device) => run(() => releaseDevice(device))}
         onstart={() => run(() => startGroup(openGroup.id))}
         onstop={() => run(() => stop())}
-        onpick={(name) => run(() => setMode(name))}
         ondelete={() => {
           run(() => deleteGroup(openGroup.id))
           page = { kind: 'home' }
@@ -154,6 +197,17 @@
       </div>
     {/if}
   </main>
+
+  {#if openGroup}
+    <ModePicker
+      effects={st?.effects ?? []}
+      scenes={st?.scenes ?? []}
+      activeEffect={st?.active_effect ?? null}
+      activeScene={st?.active_scene ?? null}
+      onplayeffect={(id) => run(() => playEffect(id))}
+      onplayscene={(id) => run(() => playScene(id))}
+    />
+  {/if}
 </div>
 
 <style>
@@ -170,6 +224,14 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+  }
+  /* Group pages get a scenes sidebar on the right. */
+  .app.with-scenes {
+    grid-template-columns: 200px minmax(0, 1fr) 220px;
+  }
+  .app :global(.picker) {
+    grid-column: 3;
+    grid-row: 2;
   }
   .welcome {
     padding: 24px;
@@ -188,9 +250,14 @@
 
   /* Narrow windows: the sidebar becomes a strip above the page. */
   @media (max-width: 640px) {
-    .app {
+    .app,
+    .app.with-scenes {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto minmax(0, 1fr);
+    }
+    .app :global(.picker) {
+      grid-column: 1;
+      grid-row: 3;
     }
   }
 </style>

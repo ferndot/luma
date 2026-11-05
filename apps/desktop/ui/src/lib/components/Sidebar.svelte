@@ -2,7 +2,7 @@
   import type { Group } from '../api'
   import Button from './Button.svelte'
 
-  export type Page = { kind: 'home' } | { kind: 'group'; id: string } | { kind: 'settings' }
+  export type Page = { kind: 'home' } | { kind: 'group'; id: string } | { kind: 'scenes' } | { kind: 'settings' }
 
   let {
     groups,
@@ -65,6 +65,11 @@
     {:else}
       <p class="muted">No groups yet. Type a name above to make one.</p>
     {/if}
+
+    <h2 class="section-title">Scenes</h2>
+    <button class="item" class:active={page.kind === 'scenes'} onclick={() => onnav({ kind: 'scenes' })}>
+      Scene builder
+    </button>
   </nav>
 
   <div class="bottom">

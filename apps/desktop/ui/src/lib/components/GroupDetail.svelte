@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { Group, Light, Rgb } from '../api'
-  import ModePicker from './ModePicker.svelte'
   import ShowStage from './ShowStage.svelte'
   import Arranger from './Arranger.svelte'
   import Button from './Button.svelte'
@@ -8,7 +7,6 @@
   let {
     group,
     lights,
-    mode,
     preview,
     positions,
     running,
@@ -19,12 +17,10 @@
     onrelease,
     onstart,
     onstop,
-    onpick,
     ondelete,
   }: {
     group: Group
     lights: Light[]
-    mode: string
     preview: Rgb[]
     positions: [number, number][]
     running: boolean
@@ -35,20 +31,24 @@
     onrelease: (device: string) => void
     onstart: () => void
     onstop: () => void
-    onpick: (name: string) => void
     ondelete: () => void
   } = $props()
 
-  type Tab = 'scene' | 'devices' | 'settings'
+  type Tab = 'scene' | 'layout' | 'devices' | 'settings'
   let tab = $state<Tab>('scene')
   const tabs: { id: Tab; label: string }[] = [
     { id: 'scene', label: 'Scene' },
+    { id: 'layout', label: 'Layout' },
     { id: 'devices', label: 'Devices' },
     { id: 'settings', label: 'Settings' },
   ]
 
   let members = $derived(lights.filter((l) => group.members.includes(l.id)))
   let available = $derived(lights.filter((l) => !group.members.includes(l.id)))
+
+  function addMember(id: string) {
+    onmembers([...group.members, id])
+  }
 
   let name = $state('')
   $effect(() => {
@@ -60,16 +60,24 @@
     await onrename(name.trim())
   }
 
-  function addDevice(e: Event) {
-    const select = e.currentTarget as HTMLSelectElement
-    if (select.value) onmembers([...group.members, select.value])
-    select.value = ''
-  }
 </script>
 
 <section class="page">
   <header class="head">
     <h1>{group.name}</h1>
+    <div class="start">
+      {#if !running && members.length === 0}
+        <span class="muted">Add devices first.</span>
+      {/if}
+      <Button
+        size="lg"
+        variant={running ? 'danger' : 'success'}
+        onclick={() => (running ? onstop() : onstart())}
+        disabled={!running && members.length === 0}
+      >
+        {running ? 'Stop scene' : 'Start scene'}
+      </Button>
+    </div>
   </header>
 
   <div class="tabs" role="tablist">
@@ -90,54 +98,56 @@
 
   <div id="panel" role="tabpanel" aria-labelledby="tab-{tab}" class="panel">
     {#if tab === 'scene'}
-      <ModePicker {mode} {onpick} />
       <ShowStage {preview} {positions} {running} />
-      <div class="actions">
-        <Button
-          size="lg"
-          variant={running ? 'danger' : 'success'}
-          onclick={() => (running ? onstop() : onstart())}
-          disabled={!running && members.length === 0}
-        >
-          {running ? 'Stop scene' : 'Start scene'}
-        </Button>
-        {#if !running && members.length === 0}
-          <span class="muted">Add devices first.</span>
-        {/if}
-      </div>
-    {:else if tab === 'devices'}
-      <div class="row-head">
-        <span class="muted">Click a light to see it. Drag to match where it is in the room. Scenes run left to right.</span>
-        {#if available.length > 0}
-          <select aria-label="Add a device" onchange={addDevice} disabled={running}>
-            <option value="">Add device…</option>
-            {#each available as l (l.id)}
-              <option value={l.id}>{l.name}</option>
-            {/each}
-          </select>
-        {/if}
-      </div>
-
-      <Arranger {members} positions={group.positions} disabled={running} onmove={onposition} {onlight} {onrelease} />
-
-      {#if members.length > 0}
-        <ul class="devices">
-          {#each members as l (l.id)}
-            <li>
-              <span class="name">{l.name}</span>
-              <span class="muted">{l.sku}</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                onclick={() => onmembers(group.members.filter((m) => m !== l.id))}
-                disabled={running}
-              >
-                Remove
-              </Button>
-            </li>
-          {/each}
-        </ul>
+    {:else if tab === 'layout'}
+      <p class="muted hint">Press a device to light it. Drag to match where it is in the room. Scenes run left to right.</p>
+      {#if members.length === 0}
+        <p class="muted">Add devices in the Devices tab first.</p>
       {/if}
+      <Arranger {members} positions={group.positions} disabled={running} onmove={onposition} {onlight} {onrelease} />
+    {:else if tab === 'devices'}
+      <div class="devices-cols">
+        <section>
+          <h2>In this group <span class="count">{members.length}</span></h2>
+          {#if members.length === 0}
+            <p class="muted">No devices yet. Add some from the list on the right.</p>
+          {:else}
+            <ul class="devices">
+              {#each members as l (l.id)}
+                <li>
+                  <span class="name">{l.name}</span>
+                  <span class="muted">{l.sku}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onclick={() => onmembers(group.members.filter((m) => m !== l.id))}
+                    disabled={running}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+
+        <section>
+          <h2>Other devices <span class="count">{available.length}</span></h2>
+          {#if available.length === 0}
+            <p class="muted">Every known device is in this group.</p>
+          {:else}
+            <ul class="devices">
+              {#each available as l (l.id)}
+                <li>
+                  <span class="name">{l.name}</span>
+                  <span class="muted">{l.sku}</span>
+                  <Button variant="ghost" size="sm" onclick={() => addMember(l.id)} disabled={running}>Add</Button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      </div>
     {:else}
       <form class="settings" onsubmit={saveName}>
         <label for="group-name" class="muted">Name</label>
@@ -160,6 +170,7 @@
 
 <style>
   .page {
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -167,9 +178,20 @@
     overflow-y: auto;
     padding: 20px 24px;
   }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
   h1 {
     margin: 0;
     font-size: 20px;
+  }
+  .start {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
 
   .tabs {
@@ -200,29 +222,25 @@
   }
 
   .panel {
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    min-height: 0;
   }
 
-  .row-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+  .hint {
+    margin: 0;
   }
-  select {
-    padding: 5px 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--raised);
-    color: var(--text);
-    font: inherit;
+  .devices-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+    align-items: start;
+  }
+  .devices-cols h2 {
+    margin: 0 0 8px;
+    font-size: 14px;
   }
   .settings {
     display: flex;

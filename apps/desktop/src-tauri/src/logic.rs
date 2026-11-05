@@ -1,5 +1,6 @@
 //! Tauri-free state and command logic, so it can be unit-tested without a window.
-use luma_engine::{LightSpec, Mode, Placed, Show};
+use luma_core::effects::{Effect, builtin_effects};
+use luma_engine::{LightSpec, Placed, Sequence, Show, Step};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,6 +43,39 @@ pub struct AppState {
     pub key_status: String,
     /// Where the saved settings are kept, when the app has a data folder.
     pub store_path: Option<PathBuf>,
+    /// Scenes the user built: presets (one step) and sequences (several).
+    pub scenes: Vec<Scene>,
+    /// The scene currently playing, if one was started.
+    pub active_scene: Option<String>,
+    /// The effect library: built-in effects and the user's own.
+    pub effects: Vec<NamedEffect>,
+    /// The effect currently playing on its own, if one was started.
+    pub active_effect: Option<String>,
+}
+
+/// An effect in the library, with the id scenes and the sidebar refer to it by.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NamedEffect {
+    pub id: String,
+    pub name: String,
+    pub effect: Effect,
+}
+
+/// One step of a scene: a library effect and how long it runs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SceneStep {
+    pub effect: String,
+    pub secs: f32,
+}
+
+/// A named scene. One step is a preset; several steps play in order as a sequence.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Scene {
+    pub id: String,
+    pub name: String,
+    pub steps: Vec<SceneStep>,
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 /// What is saved between runs.
@@ -52,6 +86,8 @@ pub struct Saved {
     pub subnets: Vec<String>,
     pub api_key: Option<String>,
     pub groups: Vec<Group>,
+    pub scenes: Vec<Scene>,
+    pub effects: Vec<NamedEffect>,
 }
 
 /// A named set of lights, stored by device id so it survives IP changes.
@@ -93,7 +129,12 @@ pub struct StateView {
     pub has_key: bool,
     pub key_status: String,
     pub groups: Vec<GroupView>,
-    pub mode: String,
+    pub effects: Vec<NamedEffect>,
+    pub scenes: Vec<Scene>,
+    /// Id of the scene playing, if one is.
+    pub active_scene: Option<String>,
+    /// Id of the effect playing on its own, if one is.
+    pub active_effect: Option<String>,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
     /// Room spot of each preview segment, in the same order.
@@ -101,14 +142,145 @@ pub struct StateView {
     pub lights: Vec<LightView>,
 }
 
-/// Parses a mode name from the UI; unknown names are a 400-style error.
-pub fn parse_mode(name: &str) -> Result<Mode, String> {
-    Mode::from_name(name).ok_or_else(|| format!("400: unknown mode '{name}'"))
+/// The effect library starts with the built-in effects, plus any the saved list is missing.
+pub fn with_builtins(mut saved: Vec<NamedEffect>) -> Vec<NamedEffect> {
+    for (id, name, effect) in builtin_effects() {
+        if !saved.iter().any(|e| e.id == id) {
+            saved.push(NamedEffect { id: id.into(), name: name.into(), effect });
+        }
+    }
+    saved
 }
 
-pub fn set_mode(state: &AppState, name: &str) -> Result<(), String> {
-    let mode = parse_mode(name)?;
-    *state.show.mode.lock().map_err(|e| e.to_string())? = mode;
+fn builtin_ids() -> Vec<&'static str> {
+    builtin_effects().into_iter().map(|(id, _, _)| id).collect()
+}
+
+fn new_id(prefix: char) -> String {
+    format!("{prefix}{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0))
+}
+
+/// Saves an effect (new when its id is empty) and returns its id. Built-in effects can be edited too.
+pub fn save_effect(state: &mut AppState, mut effect: NamedEffect) -> Result<String, String> {
+    effect.name = effect.name.trim().to_string();
+    if effect.name.is_empty() || effect.name.chars().count() > 40 {
+        return Err("Effect names need 1 to 40 characters".into());
+    }
+    effect.effect.check()?;
+    if state.effects.iter().any(|e| e.id != effect.id && e.name.eq_ignore_ascii_case(&effect.name)) {
+        return Err(format!("There is already an effect named '{}'", effect.name));
+    }
+    if effect.id.is_empty() {
+        effect.id = new_id('e');
+    }
+    match state.effects.iter_mut().find(|e| e.id == effect.id) {
+        Some(existing) => *existing = effect.clone(),
+        None => state.effects.push(effect.clone()),
+    }
+    Ok(effect.id)
+}
+
+/// Puts a built-in effect back to how it was installed.
+pub fn reset_effect(state: &mut AppState, id: &str) -> Result<(), String> {
+    let (_, name, effect) = builtin_effects()
+        .into_iter()
+        .find(|(b, _, _)| *b == id)
+        .ok_or("Only built-in effects can be reset")?;
+    match state.effects.iter_mut().find(|e| e.id == id) {
+        Some(existing) => {
+            existing.name = name.into();
+            existing.effect = effect;
+        }
+        None => state.effects.push(NamedEffect { id: id.into(), name: name.into(), effect }),
+    }
+    Ok(())
+}
+
+/// Deletes one of the user's own effects. Scenes that still use it report that when played.
+pub fn delete_effect(state: &mut AppState, id: &str) -> Result<(), String> {
+    if builtin_ids().contains(&id) {
+        return Err("Built-in effects can be reset, not deleted".into());
+    }
+    state.effects.retain(|e| e.id != id);
+    Ok(())
+}
+
+fn effect_named(state: &AppState, id: &str) -> Result<Effect, String> {
+    state.effects.iter().find(|e| e.id == id).map(|e| e.effect.clone()).ok_or_else(|| "That effect no longer exists".to_string())
+}
+
+fn set_sequence(state: &AppState, sequence: Sequence) -> Result<(), String> {
+    *state.show.sequence.lock().map_err(|e| e.to_string())? = Some(sequence);
+    Ok(())
+}
+
+/// Plays one effect on the show, repeating, until something else is picked.
+pub fn play_effect(state: &mut AppState, id: &str) -> Result<(), String> {
+    let effect = effect_named(state, id)?;
+    set_sequence(state, Sequence { steps: vec![Step { effect, secs: 1.0 }], repeat: true })?;
+    state.active_effect = Some(id.into());
+    state.active_scene = None;
+    Ok(())
+}
+
+const MAX_STEPS: usize = 12;
+
+/// Checks a scene before it is stored: a name, 1 to 12 steps, and each step names an effect in the library.
+pub fn check_scene(scene: &Scene, effects: &[NamedEffect]) -> Result<(), String> {
+    let name = scene.name.trim();
+    if name.is_empty() || name.chars().count() > 40 {
+        return Err("Scene names need 1 to 40 characters".into());
+    }
+    if scene.steps.is_empty() || scene.steps.len() > MAX_STEPS {
+        return Err(format!("A scene needs 1 to {MAX_STEPS} steps"));
+    }
+    for step in &scene.steps {
+        if !effects.iter().any(|e| e.id == step.effect) {
+            return Err("A step uses an effect that is not in the library".into());
+        }
+        if !(1.0..=600.0).contains(&step.secs) {
+            return Err("Each step must last between 1 second and 10 minutes".into());
+        }
+    }
+    Ok(())
+}
+
+/// Stores a scene (new when its id is empty) and returns its id. Names are unique, like group names.
+pub fn save_scene(state: &mut AppState, mut scene: Scene) -> Result<String, String> {
+    scene.name = scene.name.trim().to_string();
+    check_scene(&scene, &state.effects)?;
+    if state.scenes.iter().any(|s| s.id != scene.id && s.name.eq_ignore_ascii_case(&scene.name)) {
+        return Err(format!("There is already a scene named '{}'", scene.name));
+    }
+    if scene.id.is_empty() {
+        scene.id = new_id('s');
+    }
+    match state.scenes.iter_mut().find(|s| s.id == scene.id) {
+        Some(existing) => *existing = scene.clone(),
+        None => state.scenes.push(scene.clone()),
+    }
+    Ok(scene.id)
+}
+
+pub fn delete_scene(state: &mut AppState, id: &str) {
+    state.scenes.retain(|s| s.id != id);
+    if state.active_scene.as_deref() == Some(id) {
+        state.active_scene = None;
+    }
+}
+
+/// Starts a stored scene on the show. Its effects are looked up now, so edits to them apply.
+pub fn play_scene(state: &mut AppState, id: &str) -> Result<(), String> {
+    let scene = state.scenes.iter().find(|s| s.id == id).ok_or("That scene no longer exists")?;
+    let steps = scene
+        .steps
+        .iter()
+        .map(|s| effect_named(state, &s.effect).map(|effect| Step { effect, secs: s.secs }))
+        .collect::<Result<Vec<_>, _>>()?;
+    let repeat = scene.repeat;
+    set_sequence(state, Sequence { steps, repeat })?;
+    state.active_scene = Some(id.into());
+    state.active_effect = None;
     Ok(())
 }
 
@@ -171,6 +343,8 @@ pub fn save_state(state: &AppState) {
         subnets: state.custom_subnets.clone(),
         api_key: state.api_key.clone(),
         groups: state.groups.clone(),
+        scenes: state.scenes.clone(),
+        effects: state.effects.clone(),
     };
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -319,9 +493,12 @@ pub struct Session {
 fn end_session(state: &mut AppState) {
     if let Some(session) = state.session.take() {
         session.lit.end();
-        for (spec, prior) in &session.members {
-            luma_engine::restore(spec, *prior);
-        }
+        // All members at once: each one waits on its own razer settle time and network reply.
+        std::thread::scope(|s| {
+            for (spec, prior) in &session.members {
+                s.spawn(move || luma_engine::restore(spec, *prior));
+            }
+        });
     }
 }
 
@@ -347,9 +524,11 @@ pub fn light_device(state: &mut AppState, group: &str, id: &str, color: [u8; 3])
             let prior = priors.get(&l.ip).copied();
             (l, prior)
         }).collect();
-    for (spec, _) in members.iter().filter(|(l, _)| l.id != id) {
-        luma_engine::off(spec);
-    }
+    std::thread::scope(|s| {
+        for (spec, _) in members.iter().filter(|(l, _)| l.id != id) {
+            s.spawn(move || luma_engine::off(spec));
+        }
+    });
     let lit = luma_engine::light_up(lit_spec, (color[0], color[1], color[2]));
     state.session = Some(Session { id: id.to_string(), members, lit });
     Ok(())
@@ -478,7 +657,6 @@ pub fn view(state: &AppState) -> StateView {
     } else {
         state.show.status.lock().map(|s| s.clone()).unwrap_or_default()
     };
-    let mode = state.show.mode.lock().map(|m| m.label()).unwrap_or_default();
     let preview = state.show.preview.lock().map(|p| p.iter().map(|&(r, g, b)| [r, g, b]).collect()).unwrap_or_default();
     let positions = state.show.positions.lock().map(|p| p.iter().map(|&(x, y)| [x, y]).collect()).unwrap_or_default();
     let lights = state
@@ -511,7 +689,10 @@ pub fn view(state: &AppState) -> StateView {
                 positions: g.positions.clone(),
             })
             .collect(),
-        mode,
+        effects: state.effects.clone(),
+        scenes: state.scenes.clone(),
+        active_effect: state.active_effect.clone(),
+        active_scene: state.active_scene.clone(),
         status,
         preview,
         positions,
@@ -533,30 +714,6 @@ mod tests {
         let mut s = AppState::default();
         merge_found(&mut s, vec![spec("10.0.0.1", "H6022"), spec("10.0.0.2", "H6000")]);
         s
-    }
-
-    #[test]
-    fn mode_parsing_accepts_ui_names() {
-        assert_eq!(parse_mode("microphone"), Ok(Mode::Mic));
-        assert_eq!(parse_mode("screen"), Ok(Mode::Screen));
-        assert_eq!(parse_mode("chase"), Ok(Mode::Pattern("chase")));
-        assert_eq!(parse_mode("Rainbow"), Ok(Mode::Pattern("rainbow")));
-    }
-
-    #[test]
-    fn unknown_mode_is_a_400_style_error() {
-        let err = parse_mode("disco").unwrap_err();
-        assert!(err.starts_with("400"), "{err}");
-        assert!(err.contains("disco"));
-    }
-
-    #[test]
-    fn set_mode_updates_the_show() {
-        let s = AppState::default();
-        set_mode(&s, "screen").unwrap();
-        assert_eq!(*s.show.mode.lock().unwrap(), Mode::Screen);
-        assert!(set_mode(&s, "disco").is_err());
-        assert_eq!(*s.show.mode.lock().unwrap(), Mode::Screen);
     }
 
     #[test]
@@ -590,7 +747,6 @@ mod tests {
         set_selected(&mut s, &["10.0.0.2".into()]);
         let v = view(&s);
         assert!(!v.running);
-        assert_eq!(v.mode, "rainbow");
         assert_eq!(
             v.lights[0],
             LightView {
@@ -679,6 +835,62 @@ mod tests {
         assert_eq!(names.len(), 1);
         assert_eq!(names["AA:01"], "Desk strip");
         assert!(parse_device_names(&serde_json::json!({"message": "bad key"})).is_err());
+    }
+
+    /// A state with the built-in effects in its library, as on a real start.
+    fn with_effects() -> AppState {
+        AppState { effects: with_builtins(vec![]), ..Default::default() }
+    }
+
+    fn step(effect: &str, secs: f32) -> SceneStep {
+        SceneStep { effect: effect.into(), secs }
+    }
+
+    #[test]
+    fn scenes_are_checked_before_saving() {
+        let s = with_effects();
+        let bad_effect = Scene { id: String::new(), name: "x".into(), steps: vec![step("disco", 5.0)], repeat: false };
+        assert!(check_scene(&bad_effect, &s.effects).is_err());
+        let no_steps = Scene { steps: vec![], ..bad_effect.clone() };
+        assert!(check_scene(&no_steps, &s.effects).is_err());
+        let ok = Scene { steps: vec![step("chase", 5.0)], ..bad_effect };
+        assert!(check_scene(&ok, &s.effects).is_ok());
+    }
+
+    #[test]
+    fn scene_names_are_unique_and_saved_once_per_id() {
+        let mut s = with_effects();
+        let id = save_scene(&mut s, Scene { id: String::new(), name: " Warm ".into(), steps: vec![step("solid", 5.0)], repeat: false }).unwrap();
+        assert_eq!(s.scenes[0].name, "Warm");
+        assert!(save_scene(&mut s, Scene { id: String::new(), name: "warm".into(), steps: vec![step("solid", 5.0)], repeat: false }).is_err());
+        save_scene(&mut s, Scene { id: id.clone(), name: "Cool".into(), steps: vec![step("rainbow", 5.0)], repeat: false }).unwrap();
+        assert_eq!(s.scenes.len(), 1);
+        assert_eq!(s.scenes[0].name, "Cool");
+    }
+
+    #[test]
+    fn playing_a_scene_replaces_the_effect_until_one_is_picked() {
+        let mut s = with_effects();
+        let id = save_scene(&mut s, Scene { id: String::new(), name: "Seq".into(), steps: vec![step("chase", 2.0), step("solid", 3.0)], repeat: true }).unwrap();
+        play_scene(&mut s, &id).unwrap();
+        assert_eq!(view(&s).active_scene, Some(id.clone()));
+        play_effect(&mut s, "screen").unwrap();
+        assert!(view(&s).active_scene.is_none());
+        assert_eq!(view(&s).active_effect, Some("screen".to_string()));
+        delete_scene(&mut s, &id);
+        assert!(view(&s).scenes.is_empty());
+    }
+
+    #[test]
+    fn built_in_effects_can_be_edited_and_reset_but_not_deleted() {
+        let mut s = with_effects();
+        let mut rainbow = s.effects.iter().find(|e| e.id == "rainbow").unwrap().clone();
+        rainbow.effect = Effect::Solid { color: (1, 2, 3) };
+        save_effect(&mut s, rainbow).unwrap();
+        assert_eq!(s.effects.iter().find(|e| e.id == "rainbow").unwrap().effect, Effect::Solid { color: (1, 2, 3) });
+        reset_effect(&mut s, "rainbow").unwrap();
+        assert!(matches!(s.effects.iter().find(|e| e.id == "rainbow").unwrap().effect, Effect::Gradient { .. }));
+        assert!(delete_effect(&mut s, "rainbow").is_err());
     }
 
     #[test]

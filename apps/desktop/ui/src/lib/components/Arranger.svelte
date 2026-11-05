@@ -101,7 +101,8 @@
 <style>
   .room {
     position: relative;
-    height: 240px;
+    flex: 1;
+    min-height: 240px;
     border: 1px dashed var(--line);
     border-radius: 10px;
     background: var(--surface);

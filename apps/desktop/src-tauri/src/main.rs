@@ -104,9 +104,55 @@ fn remove_subnet(app: State<'_, Shared>, subnet: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_mode(app: State<'_, Shared>, name: String) -> Result<(), String> {
-    let s = lock(&app)?;
-    logic::set_mode(&s, &name)
+fn save_effect(app: State<'_, Shared>, effect: logic::NamedEffect) -> Result<String, String> {
+    let mut s = lock(&app)?;
+    let id = logic::save_effect(&mut s, effect)?;
+    logic::save_state(&s);
+    Ok(id)
+}
+
+#[tauri::command]
+fn reset_effect(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::reset_effect(&mut s, &id)?;
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_effect(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::delete_effect(&mut s, &id)?;
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn play_effect(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::play_effect(&mut s, &id)
+}
+
+#[tauri::command]
+fn save_scene(app: State<'_, Shared>, scene: logic::Scene) -> Result<String, String> {
+    let mut s = lock(&app)?;
+    let id = logic::save_scene(&mut s, scene)?;
+    logic::save_state(&s);
+    Ok(id)
+}
+
+#[tauri::command]
+fn delete_scene(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::delete_scene(&mut s, &id);
+    logic::save_state(&s);
+    Ok(())
+}
+
+#[tauri::command]
+fn play_scene(app: State<'_, Shared>, id: String) -> Result<(), String> {
+    let mut s = lock(&app)?;
+    logic::play_scene(&mut s, &id)
 }
 
 #[tauri::command]
@@ -147,6 +193,8 @@ fn main() {
                 custom_subnets: saved.subnets,
                 api_key: saved.api_key,
                 groups: saved.groups,
+                scenes: saved.scenes,
+                effects: logic::with_builtins(saved.effects),
                 ..Default::default()
             };
             logic::begin_name_fetch(&mut state);
@@ -155,7 +203,13 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
-            set_mode,
+            save_effect,
+            reset_effect,
+            delete_effect,
+            play_effect,
+            save_scene,
+            delete_scene,
+            play_scene,
             find_lights,
             add_subnet,
             remove_subnet,

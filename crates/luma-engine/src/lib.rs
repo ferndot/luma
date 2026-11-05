@@ -1,16 +1,9 @@
-//! Pure logic: modes, light specs and frame selection.
+//! Pure logic: light specs, effect sequences and frame selection.
 use luma_core::domain::Rgb;
+use luma_core::effects::{Effect, builtin_effects};
 use luma_core::modes::{mic_frame, screen_frame};
-use luma_core::patterns::NAMES;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Mode {
-    Mic,
-    Screen,
-    Pattern(&'static str),
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LightSpec {
@@ -22,23 +15,6 @@ pub struct LightSpec {
     pub segments: usize,
 }
 
-impl Mode {
-    pub fn from_name(name: &str) -> Option<Mode> {
-        let n = name.to_lowercase();
-        match n.as_str() {
-            "microphone" | "mic" => Some(Mode::Mic),
-            "screen" => Some(Mode::Screen),
-            _ => NAMES.iter().find(|(k, _)| *k == n).map(|(k, _)| Mode::Pattern(k)),
-        }
-    }
-    pub fn label(&self) -> String {
-        match self {
-            Mode::Mic => "microphone".into(),
-            Mode::Screen => "screen".into(),
-            Mode::Pattern(p) => p.to_string(),
-        }
-    }
-}
 
 /// Light specs from discovery JSON values (entries missing "ip" or "sku" are skipped).
 pub fn specs_from_discovery(found: &BTreeMap<String, Value>) -> Vec<LightSpec> {
@@ -58,70 +34,24 @@ pub fn specs_from_discovery(found: &BTreeMap<String, Value>) -> Vec<LightSpec> {
         .collect()
 }
 
-/// One frame for `mode`: one color per spot. `level` is the last mic level; `zones` captures the screen on demand.
-pub fn frame_for(
-    mode: Mode,
-    spots: &[(f32, f32)],
-    t: f64,
-    level: f32,
-    zones: impl FnOnce(usize) -> Result<Vec<Rgb>, String>,
-) -> Result<Vec<Rgb>, String> {
-    let total = spots.len();
-    Ok(match mode {
-        Mode::Mic => mic_frame(total, level, t),
-        Mode::Screen => screen_frame(spots, &zones(total)?),
-        Mode::Pattern(name) => {
-            let f = NAMES.iter().find(|(k, _)| *k == name).ok_or("unknown pattern")?.1;
-            luma_core::patterns::frame(f, spots, t)
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn mode_names_parse() {
-        assert_eq!(Mode::from_name("microphone"), Some(Mode::Mic));
-        assert_eq!(Mode::from_name("Screen"), Some(Mode::Screen));
-        assert_eq!(Mode::from_name("Rainbow"), Some(Mode::Pattern("rainbow")));
-        assert_eq!(Mode::from_name("nope"), None);
-        assert_eq!(Mode::Pattern("chase").label(), "chase");
-    }
-
-    #[test]
-    fn pattern_frame_length_is_total() {
-        let spots = luma_core::patterns::row(19);
-        for (name, _) in NAMES {
-            let f = frame_for(Mode::Pattern(name), &spots, 1.0, 0.0, |_| Err("no".into())).unwrap();
-            assert_eq!(f.len(), 19);
-        }
-    }
-
-    #[test]
-    fn screen_frame_resamples_and_errors_propagate() {
-        let spots = luma_core::patterns::row(6);
-        let f = frame_for(Mode::Screen, &spots, 0.0, 0.0, |_| Ok(vec![(1, 2, 3)])).unwrap();
-        assert_eq!(f, vec![(1, 2, 3); 6]);
-        assert!(frame_for(Mode::Screen, &spots, 0.0, 0.0, |_| Err("x".into())).is_err());
-    }
-
-    #[test]
-    fn screen_colors_follow_each_spots_column() {
-        let spots = luma_core::patterns::row(4);
-        let red = (255, 0, 0);
-        let blue = (0, 0, 255);
-        let f = frame_for(Mode::Screen, &spots, 0.0, 0.0, |_| Ok(vec![red, blue])).unwrap();
-        assert_eq!(f, vec![red, red, blue, blue]);
-    }
-
-    #[test]
-    fn mic_frame_follows_level() {
-        let spots = luma_core::patterns::row(4);
-        let f = frame_for(Mode::Mic, &spots, 0.0, 0.0, |_| Err("no".into())).unwrap();
-        assert!(f.iter().all(|c| *c == (0, 0, 0)));
+    fn sequences_step_through_and_repeat_or_hold() {
+        let step = |color, secs| Step { effect: Effect::Solid { color }, secs };
+        let seq = |repeat| Sequence { steps: vec![step((1, 0, 0), 2.0), step((0, 1, 0), 3.0)], repeat };
+        let color = |s: &Sequence, t| match s.at(t).0.effect {
+            Effect::Solid { color } => color,
+            _ => unreachable!(),
+        };
+        assert_eq!(color(&seq(false), 1.0), (1, 0, 0));
+        assert_eq!(color(&seq(false), 2.5), (0, 1, 0));
+        assert_eq!(color(&seq(false), 99.0), (0, 1, 0));
+        // Repeating: 5 seconds per cycle, so 6.0 is 1 second into the next first step.
+        assert_eq!(color(&seq(true), 6.0), (1, 0, 0));
+        assert!((seq(true).at(6.0).1 - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -159,10 +89,42 @@ use std::time::Duration;
 
 type Shared<T> = Arc<Mutex<T>>;
 
+/// One effect in a built scene: an effect name (as `Mode::from_name` reads it), a speed, and how long it runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub effect: Effect,
+    pub secs: f32,
+}
+
+/// Steps played in order from the start of the show. After the last step, the sequence repeats
+/// if `repeat` is set, and otherwise holds its last step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sequence {
+    pub steps: Vec<Step>,
+    pub repeat: bool,
+}
+
+impl Sequence {
+    /// The step playing at `t` seconds, and how far into that step we are.
+    pub fn at(&self, t: f64) -> (&Step, f64) {
+        let total: f64 = self.steps.iter().map(|s| s.secs as f64).sum();
+        let mut left = if self.repeat && total > 0.0 { t % total } else { t };
+        for step in &self.steps {
+            if left < step.secs as f64 {
+                return (step, left);
+            }
+            left -= step.secs as f64;
+        }
+        let last = self.steps.last().expect("a sequence has at least one step");
+        (last, last.secs as f64)
+    }
+}
+
 /// Runs the show on a background thread and exposes its state to any front end (GUI or web).
 #[derive(Clone)]
 pub struct Show {
-    pub mode: Shared<Mode>,
+    /// What the show plays: a sequence of effects. A one-step sequence that repeats is a single effect.
+    pub sequence: Shared<Option<Sequence>>,
     pub preview: Shared<Vec<Rgb>>,
     /// Room position of each preview segment, in the same order.
     pub positions: Shared<Vec<(f32, f32)>>,
@@ -171,10 +133,16 @@ pub struct Show {
     running: Arc<AtomicBool>,
 }
 
+/// The show starts on the built-in rainbow until something else is played.
+fn rainbow_step() -> Step {
+    let effect = builtin_effects().into_iter().find(|(id, _, _)| *id == "rainbow").expect("rainbow is built in").2;
+    Step { effect, secs: 1.0 }
+}
+
 impl Default for Show {
     fn default() -> Self {
         Self {
-            mode: Arc::new(Mutex::new(Mode::Pattern("rainbow"))),
+            sequence: Arc::new(Mutex::new(Some(Sequence { steps: vec![rainbow_step()], repeat: true }))),
             preview: Default::default(),
             positions: Default::default(),
             status: Arc::new(Mutex::new("Idle".into())),
@@ -348,14 +316,21 @@ fn engine_thread(placed: Vec<Placed>, show: &Show) -> Result<(), String> {
     for r in sent {
         r.map_err(|e| e.to_string())?;
     }
+    // Ping every light at once; each ping takes up to four seconds.
+    let lats: Vec<Duration> = std::thread::scope(|s| {
+        let handles: Vec<_> = specs.iter().map(|sp| s.spawn(|| measure(&sp.ip))).collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("latency thread panicked".to_string())))
+            .collect::<Result<_, String>>()
+    })?;
     let mut lights: Vec<Box<dyn LightPort>> = Vec::new();
-    for s in &specs {
+    for (s, lat) in specs.iter().zip(lats) {
         let light: Box<dyn LightPort> = if s.razer {
             Box::new(RazerLight::new(&s.ip, s.segments))
         } else {
             Box::new(WholeLight::new(&s.ip))
         };
-        let lat = measure(&s.ip)?;
         lights.push(Box::new(Delayed::new(light, lat)));
     }
     // The mic is created here (it may not be Send), lazily when the mode first needs it.
@@ -367,8 +342,15 @@ fn engine_thread(placed: Vec<Placed>, show: &Show) -> Result<(), String> {
     let result = run_show(
         &mut lights,
         |_total, t| {
-            let m = *show.mode.lock().unwrap();
-            if m == Mode::Mic && mic.is_none() {
+            // The step playing now picks the effect; `t` becomes the time into that step.
+            let (effect, t) = match show.sequence.lock().unwrap().as_ref() {
+                Some(seq) => {
+                    let (step, into) = seq.at(t);
+                    (step.effect.clone(), into)
+                }
+                None => (Effect::Solid { color: (255, 255, 255) }, t),
+            };
+            if matches!(effect, Effect::Microphone) && mic.is_none() {
                 match luma_audio::Mic::open(tx.clone()) {
                     Ok(x) => mic = Some(x),
                     Err(e) => {
@@ -381,13 +363,22 @@ fn engine_thread(placed: Vec<Placed>, show: &Show) -> Result<(), String> {
                 level = s.level;
             }
             if failure.is_none() {
-                *show.status.lock().unwrap() = format!("Running: {}", m.label());
+                *show.status.lock().unwrap() = "Running".into();
             }
-            let f = frame_for(m, &spots, t, level, luma_screen::capture_zones).unwrap_or_else(|e| {
-                failure = Some(e);
+            let total = spots.len();
+            let fail = |e: String, failure: &mut Option<String>| {
+                *failure = Some(e);
                 stop.store(true, Ordering::SeqCst);
-                vec![(0, 0, 0); spots.len()]
-            });
+                vec![(0, 0, 0); total]
+            };
+            let f = match &effect {
+                Effect::Microphone => mic_frame(total, level, t),
+                Effect::Screen => match luma_screen::capture_zones(total) {
+                    Ok(zones) => screen_frame(&spots, &zones),
+                    Err(e) => fail(e, &mut failure),
+                },
+                other => spots.iter().map(|&(x, y)| other.color_at(x, y, t).unwrap_or((0, 0, 0))).collect(),
+            };
             *show.preview.lock().unwrap() = f.clone();
             f
         },

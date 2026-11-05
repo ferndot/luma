@@ -34,7 +34,7 @@
   .stage {
     flex: 1;
     display: flex;
-    min-height: 180px;
+    min-height: 240px;
   }
   .preview {
     flex: 1;
@@ -42,7 +42,7 @@
     align-items: stretch;
     gap: 4px;
     padding: 10px;
-    min-height: 120px;
+    min-height: 240px;
     border-radius: 10px;
     background: var(--surface);
     border: 1px solid var(--line);
@@ -62,7 +62,7 @@
   .room {
     position: relative;
     flex: 1;
-    min-height: 120px;
+    min-height: 240px;
     border-radius: 10px;
     background: var(--surface);
     border: 1px solid var(--line);
@@ -70,8 +70,8 @@
   }
   .dot {
     position: absolute;
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
     transform: translate(-50%, -50%);
     border-radius: 50%;
     background: var(--c);

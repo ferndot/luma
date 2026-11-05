@@ -18,12 +18,14 @@ pub fn capture_zones(zones: usize) -> Result<Vec<Rgb>, String> {
 
 /// Average color of `zones` equal-width vertical slices of an RGBA image (row-major, 4 bytes per pixel).
 pub fn zone_averages(rgba: &[u8], width: usize, height: usize, zones: usize) -> Vec<Rgb> {
+    let step = (width.min(height) / 270).max(1);
     (0..zones)
         .map(|z| {
             let (x0, x1) = (z * width / zones, (z + 1) * width / zones);
             let (mut r, mut g, mut b, mut count) = (0u64, 0u64, 0u64, 0u64);
-            for y in 0..height {
-                for x in x0..x1 {
+            // Every 4th pixel on a 1080p screen: the average barely changes and the work drops 16x.
+            for y in (0..height).step_by(step) {
+                for x in (x0..x1).step_by(step) {
                     let p = (y * width + x) * 4;
                     r += rgba[p] as u64;
                     g += rgba[p + 1] as u64;

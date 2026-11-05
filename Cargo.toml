@@ -1,3 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/luma-core", "crates/luma-audio", "crates/luma-govee", "crates/luma-cli", "crates/luma-screen", "crates/luma-engine", "apps/desktop/src-tauri"]
+
+# Dependencies (screen capture, image and audio code) run optimized even in dev builds, so `tauri dev` keeps up.
+[profile.dev.package."*"]
+opt-level = 3
