@@ -37,7 +37,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("discover") => {
             let prefix = args.get(1).map(String::as_str).unwrap_or("192.168.8");
-            let found = lan::discover(Duration::from_secs(10), prefix).unwrap_or_else(|e| fail(e));
+            let found = lan::discover(Duration::from_secs(10), &[prefix.to_string()]).unwrap_or_else(|e| fail(e));
             for (id, d) in &found {
                 println!("{}  {}  {}", d["ip"].as_str().unwrap_or("?"), d["sku"].as_str().unwrap_or("?"), id);
             }
@@ -45,7 +45,7 @@ fn main() {
         }
         Some("lights") => {
             let prefix = args.get(1).map(String::as_str).unwrap_or("192.168.8");
-            let found = lan::discover(Duration::from_secs(10), prefix).unwrap_or_else(|e| fail(e));
+            let found = lan::discover(Duration::from_secs(10), &[prefix.to_string()]).unwrap_or_else(|e| fail(e));
             for d in found.values() {
                 let sku = d["sku"].as_str().unwrap_or("?");
                 let cap = capability(sku);
