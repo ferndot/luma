@@ -1,15 +1,33 @@
 <script lang="ts">
   import type { Rgb } from '../api'
 
-  let { preview, running }: { preview: Rgb[]; running: boolean } = $props()
+  let {
+    preview,
+    positions,
+    running,
+  }: { preview: Rgb[]; positions: [number, number][]; running: boolean } = $props()
+
+  // While a scene runs, each segment is drawn where it sits in the room.
+  let inRoom = $derived(running && preview.length > 0 && positions.length === preview.length)
 </script>
 
 <section class="stage" class:running>
-  <div class="preview" aria-label="Live preview">
-    {#each preview as c, i (i)}
-      <span class="bar" style="--c: rgb({c[0]}, {c[1]}, {c[2]})"></span>
-    {/each}
-  </div>
+  {#if inRoom}
+    <div class="room" aria-label="Live preview in the room">
+      {#each preview as c, i (i)}
+        <span
+          class="dot"
+          style="left: {positions[i][0] * 100}%; top: {positions[i][1] * 100}%; --c: rgb({c[0]}, {c[1]}, {c[2]})"
+        ></span>
+      {/each}
+    </div>
+  {:else}
+    <div class="preview" aria-label="Live preview">
+      {#each preview as c, i (i)}
+        <span class="bar" style="--c: rgb({c[0]}, {c[1]}, {c[2]})"></span>
+      {/each}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -39,5 +57,25 @@
   }
   .stage:not(.running) .bar {
     opacity: 0.35;
+  }
+
+  .room {
+    position: relative;
+    flex: 1;
+    min-height: 120px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .dot {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: var(--c);
+    box-shadow: 0 0 14px var(--c);
+    transition: background 0.2s linear, box-shadow 0.2s linear;
   }
 </style>

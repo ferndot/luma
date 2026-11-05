@@ -1,5 +1,5 @@
 //! Tauri-free state and command logic, so it can be unit-tested without a window.
-use luma_engine::{LightSpec, Mode, Show};
+use luma_engine::{LightSpec, Mode, Placed, Show};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -96,6 +96,8 @@ pub struct StateView {
     pub mode: String,
     pub status: String,
     pub preview: Vec<[u8; 3]>,
+    /// Room spot of each preview segment, in the same order.
+    pub positions: Vec<[f32; 2]>,
     pub lights: Vec<LightView>,
 }
 
@@ -269,33 +271,40 @@ pub fn set_group_position(state: &mut AppState, id: &str, device: &str, x: f32, 
     Ok(())
 }
 
-/// The group's known lights in the order a scene runs them: left to right, then top to bottom.
-/// Lights without a position go last.
-pub fn scene_order(state: &mut AppState, id: &str) -> Result<Vec<LightSpec>, String> {
+/// The group's known lights with the room spot each one sits at, in the order a scene runs them:
+/// left to right, then top to bottom. Lights without a spot go last, spread along the bottom.
+pub fn scene_order(state: &mut AppState, id: &str) -> Result<Vec<Placed>, String> {
     let group = find_group(state, id)?.clone();
-    let mut lights: Vec<(f32, f32, LightSpec)> = state
+    let mut lights: Vec<(Option<(f32, f32)>, LightSpec)> = state
         .known
         .iter()
         .filter(|l| group.members.contains(&l.id))
-        .map(|l| {
-            let [x, y] = group.positions.get(&l.id).copied().unwrap_or([f32::MAX, f32::MAX]);
-            (x, y, l.clone())
-        })
+        .map(|l| (group.positions.get(&l.id).map(|p| (p[0], p[1])), l.clone()))
         .collect();
     if lights.is_empty() {
         return Err("Add lights to the group first".into());
     }
-    lights.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    Ok(lights.into_iter().map(|(_, _, l)| l).collect())
+    lights.sort_by(|a, b| match (a.0, b.0) {
+        (Some(p), Some(q)) => p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let unplaced = lights.len() as f32;
+    Ok(lights
+        .into_iter()
+        .enumerate()
+        .map(|(i, (at, spec))| Placed { spec, at: at.unwrap_or(((i as f32 + 0.5) / unplaced, 0.5)) })
+        .collect())
 }
 
-/// Starts the show on the group's lights, in room order, with the current mode.
+/// Starts the show on the group's lights in room order, with the current mode.
 pub fn start_group(state: &mut AppState, id: &str) -> Result<(), String> {
     if state.show.is_running() {
         return Err("The show is already running".into());
     }
-    let specs = scene_order(state, id)?;
-    state.show.start(specs)
+    let placed = scene_order(state, id)?;
+    state.show.start(placed)
 }
 
 /// A press on a light. Holds the pressed light on its color and remembers how every group member was,
@@ -442,8 +451,15 @@ pub fn start(state: &AppState) -> Result<(), String> {
     if state.show.is_running() {
         return Err("The show is already running".into());
     }
-    let specs = state.known.iter().filter(|l| state.selected.contains(&l.ip)).cloned().collect();
-    state.show.start(specs)
+    // Lights that were never placed run left to right in the order they were found.
+    let specs: Vec<LightSpec> = state.known.iter().filter(|l| state.selected.contains(&l.ip)).cloned().collect();
+    let n = specs.len() as f32;
+    let placed = specs
+        .into_iter()
+        .enumerate()
+        .map(|(i, spec)| Placed { spec, at: ((i as f32 + 0.5) / n, 0.5) })
+        .collect();
+    state.show.start(placed)
 }
 
 pub fn stop(state: &AppState) {
@@ -464,6 +480,7 @@ pub fn view(state: &AppState) -> StateView {
     };
     let mode = state.show.mode.lock().map(|m| m.label()).unwrap_or_default();
     let preview = state.show.preview.lock().map(|p| p.iter().map(|&(r, g, b)| [r, g, b]).collect()).unwrap_or_default();
+    let positions = state.show.positions.lock().map(|p| p.iter().map(|&(x, y)| [x, y]).collect()).unwrap_or_default();
     let lights = state
         .known
         .iter()
@@ -497,6 +514,7 @@ pub fn view(state: &AppState) -> StateView {
         mode,
         status,
         preview,
+        positions,
         lights,
     }
 }
@@ -606,7 +624,7 @@ mod tests {
         assert!(scene_order(&mut s, &id).is_err());
         set_group_members(&mut s, &id, &["id-10.0.0.2".into(), "unknown".into()]).unwrap();
         assert_eq!(s.groups[0].members, vec!["id-10.0.0.2"]);
-        let order: Vec<String> = scene_order(&mut s, &id).unwrap().into_iter().map(|l| l.id).collect();
+        let order: Vec<String> = scene_order(&mut s, &id).unwrap().into_iter().map(|p| p.spec.id).collect();
         assert_eq!(order, vec!["id-10.0.0.2"]);
     }
 
@@ -617,7 +635,7 @@ mod tests {
         set_group_members(&mut s, &id, &["id-10.0.0.1".into(), "id-10.0.0.2".into()]).unwrap();
         set_group_position(&mut s, &id, "id-10.0.0.1", 0.9, 0.1).unwrap();
         set_group_position(&mut s, &id, "id-10.0.0.2", 0.1, 0.9).unwrap();
-        let order: Vec<String> = scene_order(&mut s, &id).unwrap().into_iter().map(|l| l.id).collect();
+        let order: Vec<String> = scene_order(&mut s, &id).unwrap().into_iter().map(|p| p.spec.id).collect();
         assert_eq!(order, vec!["id-10.0.0.2", "id-10.0.0.1"]);
     }
 

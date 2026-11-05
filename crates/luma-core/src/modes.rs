@@ -9,9 +9,19 @@ pub fn resample(zones: &[Rgb], n: usize) -> Vec<Rgb> {
     (0..n).map(|i| zones[i * zones.len() / n]).collect()
 }
 
-/// Screen mode: the screen's zone colors laid across the strip.
-pub fn screen_frame(n: usize, zones: &[Rgb]) -> Vec<Rgb> {
-    resample(zones, n)
+/// Screen mode: each spot shows the screen color of its own column. Zones run left to right, so a
+/// spot's x position picks its zone. Spots in the same column share a color.
+pub fn screen_frame(spots: &[(f32, f32)], zones: &[Rgb]) -> Vec<Rgb> {
+    if zones.is_empty() {
+        return vec![(0, 0, 0); spots.len()];
+    }
+    spots
+        .iter()
+        .map(|&(x, _)| {
+            let i = ((x.clamp(0.0, 1.0) * zones.len() as f32) as usize).min(zones.len() - 1);
+            zones[i]
+        })
+        .collect()
 }
 
 /// Mic mode: a hue rainbow that moves over time, brightness following `level` (0.0 to 1.0).
@@ -62,7 +72,7 @@ mod tests {
 
     #[test]
     fn screen_frame_has_requested_length() {
-        assert_eq!(screen_frame(7, &[(1, 2, 3)]).len(), 7);
+        assert_eq!(screen_frame(&[(0.1, 0.5); 7], &[(1, 2, 3)]).len(), 7);
     }
 
     #[test]

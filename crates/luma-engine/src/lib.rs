@@ -58,20 +58,21 @@ pub fn specs_from_discovery(found: &BTreeMap<String, Value>) -> Vec<LightSpec> {
         .collect()
 }
 
-/// One frame for `mode`. `level` is the last mic level; `zones` captures the screen on demand.
+/// One frame for `mode`: one color per spot. `level` is the last mic level; `zones` captures the screen on demand.
 pub fn frame_for(
     mode: Mode,
-    total: usize,
+    spots: &[(f32, f32)],
     t: f64,
     level: f32,
     zones: impl FnOnce(usize) -> Result<Vec<Rgb>, String>,
 ) -> Result<Vec<Rgb>, String> {
+    let total = spots.len();
     Ok(match mode {
         Mode::Mic => mic_frame(total, level, t),
-        Mode::Screen => screen_frame(total, &zones(total)?),
+        Mode::Screen => screen_frame(spots, &zones(total)?),
         Mode::Pattern(name) => {
             let f = NAMES.iter().find(|(k, _)| *k == name).ok_or("unknown pattern")?.1;
-            f(total, t)
+            luma_core::patterns::frame(f, spots, t)
         }
     })
 }
@@ -92,23 +93,46 @@ mod tests {
 
     #[test]
     fn pattern_frame_length_is_total() {
+        let spots = luma_core::patterns::row(19);
         for (name, _) in NAMES {
-            let f = frame_for(Mode::Pattern(name), 19, 1.0, 0.0, |_| Err("no".into())).unwrap();
+            let f = frame_for(Mode::Pattern(name), &spots, 1.0, 0.0, |_| Err("no".into())).unwrap();
             assert_eq!(f.len(), 19);
         }
     }
 
     #[test]
     fn screen_frame_resamples_and_errors_propagate() {
-        let f = frame_for(Mode::Screen, 6, 0.0, 0.0, |_| Ok(vec![(1, 2, 3)])).unwrap();
+        let spots = luma_core::patterns::row(6);
+        let f = frame_for(Mode::Screen, &spots, 0.0, 0.0, |_| Ok(vec![(1, 2, 3)])).unwrap();
         assert_eq!(f, vec![(1, 2, 3); 6]);
-        assert!(frame_for(Mode::Screen, 6, 0.0, 0.0, |_| Err("x".into())).is_err());
+        assert!(frame_for(Mode::Screen, &spots, 0.0, 0.0, |_| Err("x".into())).is_err());
+    }
+
+    #[test]
+    fn screen_colors_follow_each_spots_column() {
+        let spots = luma_core::patterns::row(4);
+        let red = (255, 0, 0);
+        let blue = (0, 0, 255);
+        let f = frame_for(Mode::Screen, &spots, 0.0, 0.0, |_| Ok(vec![red, blue])).unwrap();
+        assert_eq!(f, vec![red, red, blue, blue]);
     }
 
     #[test]
     fn mic_frame_follows_level() {
-        let f = frame_for(Mode::Mic, 4, 0.0, 0.0, |_| Err("no".into())).unwrap();
+        let spots = luma_core::patterns::row(4);
+        let f = frame_for(Mode::Mic, &spots, 0.0, 0.0, |_| Err("no".into())).unwrap();
         assert!(f.iter().all(|c| *c == (0, 0, 0)));
+    }
+
+    #[test]
+    fn segments_spread_along_a_strip_and_sit_on_a_whole_light() {
+        let strip = LightSpec { id: "a".into(), sku: "H6022".into(), ip: "1.1.1.1".into(), razer: true, segments: 3 };
+        let spots = segment_spots(&strip, (0.5, 0.2));
+        assert_eq!(spots.len(), 3);
+        assert!((spots[0].0 - 0.46).abs() < 1e-6 && (spots[2].0 - 0.54).abs() < 1e-6);
+        assert!(spots.iter().all(|s| s.1 == 0.2));
+        let whole = LightSpec { razer: false, segments: 1, ..strip };
+        assert_eq!(segment_spots(&whole, (0.5, 0.2)), vec![(0.5, 0.2)]);
     }
 
     #[test]
@@ -140,6 +164,8 @@ type Shared<T> = Arc<Mutex<T>>;
 pub struct Show {
     pub mode: Shared<Mode>,
     pub preview: Shared<Vec<Rgb>>,
+    /// Room position of each preview segment, in the same order.
+    pub positions: Shared<Vec<(f32, f32)>>,
     pub status: Shared<String>,
     stop: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
@@ -150,6 +176,7 @@ impl Default for Show {
         Self {
             mode: Arc::new(Mutex::new(Mode::Pattern("rainbow"))),
             preview: Default::default(),
+            positions: Default::default(),
             status: Arc::new(Mutex::new("Idle".into())),
             stop: Default::default(),
             running: Default::default(),
@@ -162,16 +189,16 @@ impl Show {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Starts the show on `specs`. Fails if no lights are given.
-    pub fn start(&self, specs: Vec<LightSpec>) -> Result<(), String> {
-        if specs.is_empty() {
+    /// Starts the show on the placed lights, in the order their segments run. Fails if there are none.
+    pub fn start(&self, placed: Vec<Placed>) -> Result<(), String> {
+        if placed.is_empty() {
             return Err("Select at least one light".into());
         }
         self.stop.store(false, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
         let this = self.clone();
         std::thread::spawn(move || {
-            let r = engine_thread(specs, &this);
+            let r = engine_thread(placed, &this);
             *this.status.lock().unwrap() = r.err().unwrap_or_else(|| "Idle".into());
             this.running.store(false, Ordering::SeqCst);
         });
@@ -289,7 +316,29 @@ pub fn light_up(spec: LightSpec, color: Rgb) -> Lit {
     Lit { stop, handle: Some(handle) }
 }
 
-fn engine_thread(specs: Vec<LightSpec>, show: &Show) -> Result<(), String> {
+/// A light and the spot in the room it sits at.
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub spec: LightSpec,
+    pub at: (f32, f32),
+}
+
+/// Where each segment of a light sits. A strip spreads its segments along a short horizontal line through its spot.
+pub fn segment_spots(spec: &LightSpec, at: (f32, f32)) -> Vec<(f32, f32)> {
+    const STRIP_WIDTH: f32 = 0.08;
+    let n = spec.segments;
+    if n <= 1 {
+        return vec![at];
+    }
+    (0..n)
+        .map(|k| (at.0 - STRIP_WIDTH / 2.0 + STRIP_WIDTH * k as f32 / (n - 1) as f32, at.1))
+        .collect()
+}
+
+fn engine_thread(placed: Vec<Placed>, show: &Show) -> Result<(), String> {
+    let specs: Vec<LightSpec> = placed.iter().map(|p| p.spec.clone()).collect();
+    let spots: Vec<(f32, f32)> = placed.iter().flat_map(|p| segment_spots(&p.spec, p.at)).collect();
+    *show.positions.lock().unwrap() = spots.clone();
     // Power every light on at once so one that was off shows the show; turning on a lit light is a no-op.
     let on = json!({ "msg": { "cmd": "turn", "data": { "value": 1 } } });
     let sent: Vec<std::io::Result<()>> = std::thread::scope(|s| {
@@ -317,7 +366,7 @@ fn engine_thread(specs: Vec<LightSpec>, show: &Show) -> Result<(), String> {
     let stop = show.stop.clone();
     let result = run_show(
         &mut lights,
-        |total, t| {
+        |_total, t| {
             let m = *show.mode.lock().unwrap();
             if m == Mode::Mic && mic.is_none() {
                 match luma_audio::Mic::open(tx.clone()) {
@@ -334,10 +383,10 @@ fn engine_thread(specs: Vec<LightSpec>, show: &Show) -> Result<(), String> {
             if failure.is_none() {
                 *show.status.lock().unwrap() = format!("Running: {}", m.label());
             }
-            let f = frame_for(m, total, t, level, luma_screen::capture_zones).unwrap_or_else(|e| {
+            let f = frame_for(m, &spots, t, level, luma_screen::capture_zones).unwrap_or_else(|e| {
                 failure = Some(e);
                 stop.store(true, Ordering::SeqCst);
-                vec![(0, 0, 0); total]
+                vec![(0, 0, 0); spots.len()]
             });
             *show.preview.lock().unwrap() = f.clone();
             f

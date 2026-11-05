@@ -2,14 +2,14 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::domain::{LightPort, Rgb};
-use crate::patterns::Pattern;
+use crate::patterns::{Pattern, frame, row};
 
 /// Plays a pattern on any light at 10 fps for `secs` seconds. Pattern length follows the light's segments.
 pub fn play(light: &mut dyn LightPort, f: Pattern, secs: u64) -> Result<(), String> {
     let start = Instant::now();
     let n = light.segments();
     while start.elapsed() < Duration::from_secs(secs) {
-        light.show(&f(n, start.elapsed().as_secs_f64()))?;
+        light.show(&frame(f, &row(n), start.elapsed().as_secs_f64()))?;
         sleep(Duration::from_millis(100));
     }
     light.close()
@@ -21,7 +21,7 @@ pub fn play(light: &mut dyn LightPort, f: Pattern, secs: u64) -> Result<(), Stri
 /// own latency, so every light shows that frame at the same moment.
 pub fn play_show(lights: &mut [Box<dyn LightPort>], f: Pattern, secs: u64) -> Result<(), String> {
     let start = Instant::now();
-    run_show(lights, |total, t| f(total, t), || start.elapsed() < Duration::from_secs(secs))
+    run_show(lights, |total, t| frame(f, &row(total), t), || start.elapsed() < Duration::from_secs(secs))
 }
 
 /// The show loop with the frame source and stop condition supplied by the caller.

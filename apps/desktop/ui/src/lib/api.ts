@@ -40,6 +40,7 @@ export type AppState = {
   mode: string
   status: string
   preview: Rgb[]
+  positions: [number, number][]
   lights: Light[]
 }
 

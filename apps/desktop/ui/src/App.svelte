@@ -133,6 +133,7 @@
         lights={st?.lights ?? []}
         mode={st?.mode ?? ''}
         preview={st?.preview ?? []}
+        positions={st?.positions ?? []}
         running={st?.running ?? false}
         onrename={(name) => run(() => renameGroup(openGroup.id, name))}
         onmembers={(members) => run(() => setGroupMembers(openGroup.id, members))}

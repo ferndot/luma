@@ -10,6 +10,7 @@
     lights,
     mode,
     preview,
+    positions,
     running,
     onrename,
     onmembers,
@@ -25,6 +26,7 @@
     lights: Light[]
     mode: string
     preview: Rgb[]
+    positions: [number, number][]
     running: boolean
     onrename: (name: string) => Promise<boolean>
     onmembers: (members: string[]) => void
@@ -89,7 +91,7 @@
   <div id="panel" role="tabpanel" aria-labelledby="tab-{tab}" class="panel">
     {#if tab === 'scene'}
       <ModePicker {mode} {onpick} />
-      <ShowStage {preview} {running} />
+      <ShowStage {preview} {positions} {running} />
       <div class="actions">
         <Button
           size="lg"
