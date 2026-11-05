@@ -174,17 +174,20 @@ impl Show {
     }
 }
 
-/// The local /24 prefix (e.g. "192.168.1") of the network this machine is on, if any.
-pub fn local_prefix() -> Option<String> {
-    luma_govee::lan::local_prefix()
+/// Subnets scanned even when this machine's adapters point elsewhere (for example a VPN),
+/// because lights were found on them before.
+const FALLBACK_PREFIXES: &[&str] = &["192.168.10"];
+
+/// The /24 prefixes to scan for lights, most likely first. Empty if no network is found.
+pub fn local_prefixes() -> Vec<String> {
+    luma_govee::lan::local_prefixes(FALLBACK_PREFIXES)
 }
 
-/// Discovers lights on `subnet` in the background; the result arrives on the returned channel.
-pub fn find_lights(subnet: &str) -> mpsc::Receiver<Result<Vec<LightSpec>, String>> {
+/// Discovers lights on `prefixes` in the background; the result arrives on the returned channel.
+pub fn find_lights(prefixes: Vec<String>) -> mpsc::Receiver<Result<Vec<LightSpec>, String>> {
     let (tx, rx) = mpsc::channel();
-    let prefix = subnet.to_string();
     std::thread::spawn(move || {
-        let r = luma_govee::lan::discover(Duration::from_secs(10), &prefix).map(|m| specs_from_discovery(&m));
+        let r = luma_govee::lan::discover(Duration::from_secs(10), &prefixes).map(|m| specs_from_discovery(&m));
         let _ = tx.send(r);
     });
     rx

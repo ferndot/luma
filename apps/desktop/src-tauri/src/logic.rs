@@ -92,10 +92,12 @@ pub fn begin_discovery(state: &mut AppState) -> Result<(), String> {
     if state.discovery.is_some() {
         return Ok(());
     }
-    let prefix = luma_engine::local_prefix()
-        .ok_or("No network found. Connect to Wi-Fi or Ethernet and try again.")?;
-    state.subnet = format!("{prefix}.0/24");
-    state.discovery = Some(luma_engine::find_lights(&prefix));
+    let prefixes = luma_engine::local_prefixes();
+    if prefixes.is_empty() {
+        return Err("No network found. Connect to Wi-Fi or Ethernet and try again.".into());
+    }
+    state.subnet = prefixes.iter().map(|p| format!("{p}.0/24")).collect::<Vec<_>>().join(", ");
+    state.discovery = Some(luma_engine::find_lights(prefixes));
     Ok(())
 }
 
