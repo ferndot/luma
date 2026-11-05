@@ -1,0 +1,9 @@
+[package]
+name = "luma"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+luma-core = { path = "../luma-core" }
+luma-audio = { path = "../luma-audio" }
+luma-govee = { path = "../luma-govee" }

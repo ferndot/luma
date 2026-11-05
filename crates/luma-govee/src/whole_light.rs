@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use super::lan;
-use crate::domain::{LightPort, Rgb};
+use crate::lan;
+use luma_core::domain::{LightPort, Rgb};
 
 /// A light with no razer support, driven as one segment through standard LAN commands.
 pub struct WholeLight {

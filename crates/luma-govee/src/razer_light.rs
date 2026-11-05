@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use super::{lan, razer};
-use crate::domain::{LightPort, Rgb};
+use crate::{lan, razer};
+use luma_core::domain::{LightPort, Rgb};
 
 /// Razer mode is dropped after about a minute without frames, so re-arm it well before that.
 const REARM_EVERY: Duration = Duration::from_secs(30);

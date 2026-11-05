@@ -1,17 +1,14 @@
-mod adapters;
-mod app;
-mod domain;
-mod patterns;
 
 use std::env;
 use std::time::Duration;
+use luma_core::{app, patterns};
 
-use adapters::{lan, razer_light::RazerLight, whole_light::WholeLight};
-use domain::{capability, LightPort};
+use luma_govee::{capability, lan, razer_light::RazerLight, whole_light::WholeLight};
+use luma_core::domain::LightPort;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  govee-control discover [subnet-prefix]\n  govee-control lights [subnet-prefix]\n  govee-control probe <ip> <segments> [seconds]\n  govee-control pattern <ip> <sku> <solid|chase|breathe|rainbow> [seconds]\n  govee-control show <solid|chase|breathe|rainbow> <seconds> <ip:sku>..."
+        "usage:\n  luma discover [subnet-prefix]\n  luma lights [subnet-prefix]\n  luma probe <ip> <segments> [seconds]\n  luma pattern <ip> <sku> <solid|chase|breathe|rainbow> [seconds]\n  luma show <solid|chase|breathe|rainbow> <seconds> <ip:sku>..."
     );
     std::process::exit(2);
 }
@@ -81,12 +78,25 @@ fn main() {
                     _ => usage(),
                 };
                 let extra = parts.get(2).map(|s| s.parse::<u64>().unwrap_or_else(|_| usage())).unwrap_or(0);
-                let latency = adapters::latency::measure(ip).unwrap_or_else(|e| fail(e))
+                let latency = luma_core::adapters::latency::measure(ip).unwrap_or_else(|e| fail(e))
                     + std::time::Duration::from_millis(extra);
                 println!("{ip} {sku}: one-way latency {} ms", latency.as_millis());
-                lights.push(Box::new(adapters::latency::Delayed::new(make_light(ip, sku), latency)));
+                lights.push(Box::new(luma_core::adapters::latency::Delayed::new(make_light(ip, sku), latency)));
             }
             app::play_show(&mut lights, pattern_named(&args[1]), secs).unwrap_or_else(|e| fail(e));
+        }
+        // Prints the microphone loudness as a bar, ten times a second.
+        Some("meter") => {
+            let secs: u64 = args.get(1).map(|s| s.parse().unwrap_or_else(|_| usage())).unwrap_or(10);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _mic = luma_audio::Mic::open(tx).unwrap_or_else(|e| fail(e));
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(secs) {
+                let level = luma_core::domain::latest(&rx).map_or(0.0, |s| s.level);
+                let bars = (level * 200.0).min(60.0) as usize;
+                println!("{level:5.3} {}", "#".repeat(bars));
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         _ => usage(),
     }
